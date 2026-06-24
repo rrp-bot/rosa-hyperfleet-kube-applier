@@ -9,6 +9,11 @@ SPECS_TABLE="${SPECS_TABLE_PREFIX:-mc-${MC_NAME}-specs}"
 STATUS_TABLE="${STATUS_TABLE_PREFIX:-mc-${MC_NAME}-status}"
 VERBOSITY="${LOG_VERBOSITY:-4}"
 
+# Use static LocalStack credentials when no real AWS credentials are present.
+# These are the conventional dummy values accepted by LocalStack.
+export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-test}"
+export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-test}"
+
 echo "Building kube-applier-aws..."
 make build
 
