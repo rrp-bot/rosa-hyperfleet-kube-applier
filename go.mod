@@ -1,8 +1,6 @@
 module github.com/rrp-bot/kube-applier-aws
 
-go 1.22.0
-
-toolchain go1.24.4
+go 1.26.3
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.41.5
