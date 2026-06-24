@@ -4,7 +4,7 @@ WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o /kube-applier-aws .
+RUN CGO_ENABLED=0 GOOS=linux go build -buildvcs=false -o /kube-applier-aws .
 
 FROM registry.access.redhat.com/ubi9/ubi-minimal:9.8-1782191395
 COPY --from=builder /kube-applier-aws /kube-applier-aws
