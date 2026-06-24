@@ -266,16 +266,16 @@ func (c *dynamoDBDesireCRUD[T, PT]) Delete(ctx context.Context, documentID strin
 
 // ItemToApplyDesire converts a raw DynamoDB attribute map (from a table item or
 // stream image) to an *ApplyDesire.
-func ItemToApplyDesire(item map[string]types.AttributeValue) (any, error) {
+func ItemToApplyDesire(item map[string]types.AttributeValue) (*kubeapplier.ApplyDesire, error) {
 	return itemToDesire[kubeapplier.ApplyDesire, *kubeapplier.ApplyDesire](item)
 }
 
 // ItemToDeleteDesire converts a raw DynamoDB attribute map to a *DeleteDesire.
-func ItemToDeleteDesire(item map[string]types.AttributeValue) (any, error) {
+func ItemToDeleteDesire(item map[string]types.AttributeValue) (*kubeapplier.DeleteDesire, error) {
 	return itemToDesire[kubeapplier.DeleteDesire, *kubeapplier.DeleteDesire](item)
 }
 
 // ItemToReadDesire converts a raw DynamoDB attribute map to a *ReadDesire.
-func ItemToReadDesire(item map[string]types.AttributeValue) (any, error) {
+func ItemToReadDesire(item map[string]types.AttributeValue) (*kubeapplier.ReadDesire, error) {
 	return itemToDesire[kubeapplier.ReadDesire, *kubeapplier.ReadDesire](item)
 }
