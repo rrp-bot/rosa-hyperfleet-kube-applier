@@ -8,7 +8,7 @@ import (
 
 func TestApplyDesireKeyFromDesire_ClusterScoped(t *testing.T) {
 	d := &kubeapplier.ApplyDesire{
-		FirestoreMetadata: kubeapplier.FirestoreMetadata{DocumentID: "desire-1"},
+		DynamoDBMetadata: kubeapplier.DynamoDBMetadata{DocumentID: "desire-1"},
 		Spec: kubeapplier.ApplyDesireSpec{
 			ClusterID: "cluster-a",
 		},
@@ -30,7 +30,7 @@ func TestApplyDesireKeyFromDesire_ClusterScoped(t *testing.T) {
 
 func TestApplyDesireKeyFromDesire_NodePoolScoped(t *testing.T) {
 	d := &kubeapplier.ApplyDesire{
-		FirestoreMetadata: kubeapplier.FirestoreMetadata{DocumentID: "desire-2"},
+		DynamoDBMetadata: kubeapplier.DynamoDBMetadata{DocumentID: "desire-2"},
 		Spec: kubeapplier.ApplyDesireSpec{
 			ClusterID:  "cluster-a",
 			NodePoolName: "np-1",
@@ -60,7 +60,7 @@ func TestApplyDesireKeyFromDesire_EmptyDocumentID(t *testing.T) {
 
 func TestDeleteDesireKeyFromDesire(t *testing.T) {
 	d := &kubeapplier.DeleteDesire{
-		FirestoreMetadata: kubeapplier.FirestoreMetadata{DocumentID: "del-1"},
+		DynamoDBMetadata: kubeapplier.DynamoDBMetadata{DocumentID: "del-1"},
 		Spec: kubeapplier.DeleteDesireSpec{
 			ClusterID:  "cluster-b",
 			NodePoolName: "np-2",
@@ -88,7 +88,7 @@ func TestDeleteDesireKeyFromDesire_EmptyDocumentID(t *testing.T) {
 
 func TestReadDesireKeyFromDesire(t *testing.T) {
 	d := &kubeapplier.ReadDesire{
-		FirestoreMetadata: kubeapplier.FirestoreMetadata{DocumentID: "read-1"},
+		DynamoDBMetadata: kubeapplier.DynamoDBMetadata{DocumentID: "read-1"},
 		Spec: kubeapplier.ReadDesireSpec{
 			ClusterID: "cluster-c",
 		},
