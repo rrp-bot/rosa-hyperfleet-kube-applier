@@ -1,0 +1,6 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kube-applier-test-ns
+  labels:
+    managed-by: kube-applier

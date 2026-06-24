@@ -1,0 +1,15 @@
+# Build outputs
+/kube-applier-aws
+/desire-tool
+/desirectl
+
+# Go
+*.test
+*.out
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
