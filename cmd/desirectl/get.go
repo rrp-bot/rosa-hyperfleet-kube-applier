@@ -257,8 +257,17 @@ func pollReadDesireStatus(ctx context.Context, statusDB database.KubeApplierDBCl
 			return nil, fmt.Errorf("getting status: %w", err)
 		}
 
-		if !readDesire.Status.ObservedDesireUpdateTime.IsZero() &&
-			!readDesire.Status.ObservedDesireUpdateTime.Before(afterTime) {
+		// If the controller has already observed this version of the desire
+		// (ObservedDesireUpdateTime >= afterTime), return immediately.
+		fresh := !readDesire.Status.ObservedDesireUpdateTime.IsZero() &&
+			!readDesire.Status.ObservedDesireUpdateTime.Before(afterTime)
+
+		// Also accept any existing KubeContent even if the controller hasn't
+		// re-synced yet — avoids waiting a full resync period when the data
+		// is already present from a prior reconcile.
+		hasContent := readDesire.Status.KubeContent != nil && len(readDesire.Status.KubeContent.Raw) > 0
+
+		if fresh || hasContent {
 			for _, c := range readDesire.Status.Conditions {
 				if c.Type == kubeapplier.ConditionTypeSuccessful && c.Status == "False" {
 					return nil, fmt.Errorf("read failed: %s: %s", c.Reason, c.Message)
@@ -268,9 +277,6 @@ func pollReadDesireStatus(ctx context.Context, statusDB database.KubeApplierDBCl
 		}
 
 		if time.Now().After(deadline) {
-			if readDesire.Status.KubeContent != nil && len(readDesire.Status.KubeContent.Raw) > 0 {
-				return &readDesire.Status, nil
-			}
 			return nil, fmt.Errorf("timed out waiting for fresh status")
 		}
 
