@@ -12,6 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -45,6 +46,7 @@ func newDynamoDBStreamWatcher(
 		done:     make(chan struct{}),
 		cancel:   cancel,
 	}
+	klog.V(4).InfoS("stream watcher starting", "table", tableName)
 	go w.run(ctx, dbClient, streamsClient, tableName, convertFn)
 	return w
 }
@@ -63,23 +65,28 @@ func (w *dynamoDBStreamWatcher) run(
 	streamARN, err := getTableStreamARN(ctx, dbClient, tableName)
 	if err != nil {
 		if ctx.Err() == nil {
+			klog.ErrorS(err, "stream watcher failed to get stream ARN", "table", tableName)
 			w.sendError(ctx, err)
 		}
 		return
 	}
 	if streamARN == "" {
 		// Streams not enabled — nothing to watch.
+		klog.V(2).InfoS("stream watcher: streams not enabled on table, watch is a no-op", "table", tableName)
 		return
 	}
+	klog.V(4).InfoS("stream watcher connected", "table", tableName, "streamARN", streamARN)
 
 	// Get all shards for the stream.
 	shardIters, err := getShardIterators(ctx, streamsClient, streamARN)
 	if err != nil {
 		if ctx.Err() == nil {
+			klog.ErrorS(err, "stream watcher failed to get shard iterators", "table", tableName)
 			w.sendError(ctx, err)
 		}
 		return
 	}
+	klog.V(4).InfoS("stream watcher opened shard iterators", "table", tableName, "shards", len(shardIters))
 
 	// Poll all shard iterators in a round-robin loop.
 	for {
@@ -95,6 +102,7 @@ func (w *dynamoDBStreamWatcher) run(
 				shardIters, err = getShardIterators(ctx, streamsClient, streamARN)
 				if err != nil {
 					if ctx.Err() == nil {
+						klog.ErrorS(err, "stream watcher failed to re-discover shards", "table", tableName)
 						w.sendError(ctx, err)
 					}
 					return
@@ -111,6 +119,7 @@ func (w *dynamoDBStreamWatcher) run(
 					return
 				}
 				// Iterator expired or other transient error — skip this shard.
+				klog.V(4).InfoS("stream watcher skipping expired/errored shard iterator", "table", tableName, "err", err)
 				continue
 			}
 			for _, rec := range records {
@@ -137,7 +146,11 @@ func (w *dynamoDBStreamWatcher) run(
 				}
 				obj, err := convertFn(image)
 				if err != nil {
+					klog.V(4).InfoS("stream watcher skipping unconvertible record", "table", tableName, "eventName", rec.EventName, "err", err)
 					continue
+				}
+				if accessor, ok := obj.(metav1.ObjectMetaAccessor); ok {
+					klog.V(2).InfoS("stream watcher delivering event", "table", tableName, "eventType", eventType, "documentID", accessor.GetObjectMeta().GetName())
 				}
 				select {
 				case w.resultCh <- watch.Event{Type: eventType, Object: obj}:
