@@ -22,12 +22,15 @@ const (
 	streamPollInterval = 2 * time.Second
 	// streamRetryDelay is the backoff when a transient shard error occurs.
 	streamRetryDelay = 5 * time.Second
-	// streamWatchTimeout is the maximum lifetime of a single watch session.
-	// After this duration the watcher sends a 410 Gone to the Reflector,
-	// which responds with a full relist + fresh DescribeStream, bounding
-	// the window during which shard drift could go undetected.
-	streamWatchTimeout = 5 * time.Minute
 )
+
+// streamWatchTimeout is the maximum lifetime of a single watch session.
+// After this duration the watcher sends a 410 Gone to the Reflector,
+// which responds with a full relist + fresh DescribeStream, bounding
+// the window during which shard drift could go undetected.
+//
+// Declared as a var (not const) so tests can temporarily shorten it.
+var streamWatchTimeout = 5 * time.Minute
 
 // dynamoDBStreamWatcher implements watch.Interface by tailing a DynamoDB
 // Stream on a single table. It discovers the stream ARN from the table
