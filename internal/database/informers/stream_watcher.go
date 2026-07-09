@@ -2,6 +2,7 @@ package informers
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -19,8 +20,13 @@ const (
 	// streamPollInterval is how often we poll for new stream records when no
 	// shard iterator is exhausted.
 	streamPollInterval = 2 * time.Second
-	// streamRetryDelay is the backoff when an error occurs.
+	// streamRetryDelay is the backoff when a transient shard error occurs.
 	streamRetryDelay = 5 * time.Second
+	// streamWatchTimeout is the maximum lifetime of a single watch session.
+	// After this duration the watcher sends a 410 Gone to the Reflector,
+	// which responds with a full relist + fresh DescribeStream, bounding
+	// the window during which shard drift could go undetected.
+	streamWatchTimeout = 5 * time.Minute
 )
 
 // dynamoDBStreamWatcher implements watch.Interface by tailing a DynamoDB
@@ -88,9 +94,16 @@ func (w *dynamoDBStreamWatcher) run(
 	}
 	klog.V(4).InfoS("stream watcher opened shard iterators", "table", tableName, "shards", len(shardIters))
 
+	startTime := time.Now()
+
 	// Poll all shard iterators in a round-robin loop.
 	for {
 		if ctx.Err() != nil {
+			return
+		}
+		if time.Since(startTime) >= streamWatchTimeout {
+			klog.V(2).InfoS("stream watcher: timeout reached, triggering relist", "table", tableName)
+			w.sendError(ctx, fmt.Errorf("watch timeout after %s, forcing relist", streamWatchTimeout))
 			return
 		}
 		if len(shardIters) == 0 {
@@ -118,8 +131,16 @@ func (w *dynamoDBStreamWatcher) run(
 				if ctx.Err() != nil {
 					return
 				}
-				// Iterator expired or other transient error — skip this shard.
-				klog.V(4).InfoS("stream watcher skipping expired/errored shard iterator", "table", tableName, "err", err)
+				// Transient error (e.g. LimitExceededException, network blip) —
+				// re-queue the current iterator so the shard is not permanently
+				// lost, then back off before the next round.
+				klog.ErrorS(err, "stream watcher: transient error polling shard, retrying", "table", tableName)
+				nextIters = append(nextIters, iter)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(streamRetryDelay):
+				}
 				continue
 			}
 			for _, rec := range records {
