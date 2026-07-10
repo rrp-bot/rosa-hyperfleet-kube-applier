@@ -270,11 +270,6 @@ func ItemToApplyDesire(item map[string]types.AttributeValue) (*kubeapplier.Apply
 	return itemToDesire[kubeapplier.ApplyDesire, *kubeapplier.ApplyDesire](item)
 }
 
-// ItemToDeleteDesire converts a raw DynamoDB attribute map to a *DeleteDesire.
-func ItemToDeleteDesire(item map[string]types.AttributeValue) (*kubeapplier.DeleteDesire, error) {
-	return itemToDesire[kubeapplier.DeleteDesire, *kubeapplier.DeleteDesire](item)
-}
-
 // ItemToReadDesire converts a raw DynamoDB attribute map to a *ReadDesire.
 func ItemToReadDesire(item map[string]types.AttributeValue) (*kubeapplier.ReadDesire, error) {
 	return itemToDesire[kubeapplier.ReadDesire, *kubeapplier.ReadDesire](item)
