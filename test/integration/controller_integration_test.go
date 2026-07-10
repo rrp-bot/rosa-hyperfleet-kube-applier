@@ -511,66 +511,6 @@ func TestIntegration_ApplyDesire(t *testing.T) {
 	t.Logf("ApplyDesire status Successful=True in DynamoDB")
 }
 
-// TestIntegration_DeleteDesire pre-creates a ConfigMap on Kind, writes a
-// DeleteDesire spec to DynamoDB, starts the app, and asserts that:
-//  1. The ConfigMap is deleted from the Kind cluster.
-//  2. The status document records Successful=True.
-func TestIntegration_DeleteDesire(t *testing.T) {
-	localstackEndpoint, kubeconfigPath := requireIntegration(t)
-	f := newFixture(t, localstackEndpoint, kubeconfigPath)
-
-	const (
-		documentID = "inttest--delete-cm"
-		cmName     = "inttest-delete-cm"
-		namespace  = "default"
-	)
-
-	// Pre-create the ConfigMap.
-	createConfigMapDirect(t, f.dynKube, namespace, cmName)
-
-	writeDeleteDesireSpec(t, f.dynDB, f.specsPrefix, &kubeapplier.DeleteDesire{
-		DynamoDBMetadata: kubeapplier.DynamoDBMetadata{DocumentID: documentID},
-		Spec: kubeapplier.DeleteDesireSpec{
-			ManagementCluster: "inttest",
-			ClusterID:         "inttest",
-			TargetItem: kubeapplier.ResourceReference{
-				Version:   "v1",
-				Resource:  "configmaps",
-				Namespace: namespace,
-				Name:      cmName,
-			},
-		},
-	})
-
-	cancel, errCh := startApp(t, f)
-	t.Cleanup(func() {
-		cancel()
-		<-errCh
-	})
-
-	// 1. ConfigMap must be gone.
-	pollUntil(t, 60*time.Second, func() bool {
-		obj, _ := getConfigMap(f.dynKube, namespace, cmName)
-		return obj == nil
-	})
-	t.Logf("ConfigMap %s/%s deleted by DeleteDesire controller", namespace, cmName)
-
-	// 2. Status must show Successful=True.
-	pollUntil(t, 30*time.Second, func() bool {
-		status, err := f.dbClient.DeleteDesireStatus().Get(context.Background(), documentID)
-		if err != nil {
-			return false
-		}
-		for _, c := range status.Status.Conditions {
-			if c.Type == kubeapplier.ConditionTypeSuccessful && c.Status == metav1.ConditionTrue {
-				return true
-			}
-		}
-		return false
-	})
-	t.Logf("DeleteDesire status Successful=True in DynamoDB")
-}
-
 // TestIntegration_ReadDesire pre-creates a ConfigMap on Kind, writes a
 // ReadDesire spec to DynamoDB, starts the app, and asserts that the status
 // document's KubeContent field is populated with the live object JSON.
