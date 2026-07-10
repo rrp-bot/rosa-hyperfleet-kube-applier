@@ -398,13 +398,6 @@ func TestIntegration_DeleteDesire(t *testing.T) {
 	})
 	t.Logf("ApplyDesire (Type=Delete) status Successful=True in DynamoDB")
 }
-	if _, err := dbClient.PutItem(context.Background(), &dynamodb.PutItemInput{
-		TableName: aws.String(tableName),
-		Item:      item,
-	}); err != nil {
-		t.Fatalf("writeDeleteDesireSpec PutItem %s/%s: %v", tableName, d.DocumentID, err)
-	}
-}
 
 func writeReadDesireSpec(t *testing.T, dbClient *dynamodb.Client, specsPrefix string, d *kubeapplier.ReadDesire) {
 	t.Helper()
