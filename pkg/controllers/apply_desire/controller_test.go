@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/dynamic/fake"
 	clienttesting "k8s.io/client-go/testing"
@@ -28,10 +29,12 @@ import (
 	"github.com/rrp-bot/kube-applier-aws/pkg/controllers/keys"
 )
 
-func fakeDynamic(t *testing.T, gvrToListKind map[schema.GroupVersionResource]string) *fake.FakeDynamicClient {
+var configMapGVR = schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}
+
+func fakeDynamic(t *testing.T, gvrToListKind map[schema.GroupVersionResource]string, objects ...runtime.Object) *fake.FakeDynamicClient {
 	t.Helper()
 	scheme := runtime.NewScheme()
-	return fake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind)
+	return fake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind, objects...)
 }
 
 func configMapTarget(name string) kubeapplier.ResourceReference {
@@ -40,6 +43,7 @@ func configMapTarget(name string) kubeapplier.ResourceReference {
 	}
 }
 
+// newApplyDesire creates an SSA ApplyDesire with kubeContent.
 func newApplyDesire(t *testing.T, name string, target kubeapplier.ResourceReference, kubeContent []byte) *kubeapplier.ApplyDesire {
 	t.Helper()
 	d := &kubeapplier.ApplyDesire{}
@@ -48,10 +52,28 @@ func newApplyDesire(t *testing.T, name string, target kubeapplier.ResourceRefere
 	d.Spec = kubeapplier.ApplyDesireSpec{
 		ManagementCluster: "mc-1",
 		ClusterID:         "cluster1",
+		Type:              kubeapplier.ApplyDesireTypeServerSideApply,
 		TargetItem:        target,
 	}
 	if kubeContent != nil {
-		d.Spec.KubeContent = &runtime.RawExtension{Raw: kubeContent}
+		d.Spec.ServerSideApply = &kubeapplier.ServerSideApplyConfig{
+			KubeContent: &runtime.RawExtension{Raw: kubeContent},
+		}
+	}
+	return d
+}
+
+// newDeleteApplyDesire creates a Delete-type ApplyDesire.
+func newDeleteApplyDesire(t *testing.T, name string, target kubeapplier.ResourceReference) *kubeapplier.ApplyDesire {
+	t.Helper()
+	d := &kubeapplier.ApplyDesire{}
+	d.SetDocumentID("cluster1--" + name)
+	d.SetUpdateTime(time.Unix(1, 0))
+	d.Spec = kubeapplier.ApplyDesireSpec{
+		ManagementCluster: "mc-1",
+		ClusterID:         "cluster1",
+		Type:              kubeapplier.ApplyDesireTypeDelete,
+		TargetItem:        target,
 	}
 	return d
 }
@@ -72,14 +94,17 @@ func newCadenceController(t *testing.T, cfg Config) *ApplyDesireController {
 	cfg = cfg.withDefaults()
 	checker := controllerutils.NewTimeBasedCooldownChecker(cfg.CooldownPeriod)
 	checker.SetClock(cfg.Clock)
+	deleteCooldownChecker := controllerutils.NewTimeBasedCooldownChecker(cfg.DeleteCooldownPeriod)
+	deleteCooldownChecker.SetClock(cfg.Clock)
 	return &ApplyDesireController{
 		name: "ApplyDesireController",
 		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
 			workqueue.DefaultTypedControllerRateLimiter[keys.ApplyDesireKey](),
 			workqueue.TypedRateLimitingQueueConfig[keys.ApplyDesireKey]{Name: "test"},
 		),
-		cfg:      cfg,
-		cooldown: checker,
+		cfg:            cfg,
+		cooldown:       checker,
+		deleteCooldown: deleteCooldownChecker,
 	}
 }
 
@@ -91,6 +116,58 @@ func (f *errFetcher) Fetch(context.Context, keys.ApplyDesireKey) (*kubeapplier.A
 
 func validConfigMapJSON(name string) []byte {
 	return []byte(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"` + name + `","namespace":"default"},"data":{"key":"value"}}`)
+}
+
+func existingConfigMap(name string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1", "kind": "ConfigMap",
+		"metadata": map[string]any{
+			"name": name, "namespace": "default",
+			"uid": "test-uid-123",
+		},
+	}}
+}
+
+func terminatingConfigMap(name string) *unstructured.Unstructured {
+	now := metav1.Now()
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1", "kind": "ConfigMap",
+		"metadata": map[string]any{
+			"name": name, "namespace": "default",
+			"uid":                        "test-uid-123",
+			"deletionTimestamp":           now.Format(time.RFC3339),
+			"deletionGracePeriodSeconds":  int64(0),
+		},
+	}}
+}
+
+func assertCondition(t *testing.T, conds []metav1.Condition, condType string, status metav1.ConditionStatus, reason string) {
+	t.Helper()
+	for _, c := range conds {
+		if c.Type == condType {
+			if c.Status != status {
+				t.Errorf("condition %s: expected status %s, got %s", condType, status, c.Status)
+			}
+			if reason != "" && c.Reason != reason {
+				t.Errorf("condition %s: expected reason %s, got %s", condType, reason, c.Reason)
+			}
+			return
+		}
+	}
+	t.Errorf("condition %s not found in %+v", condType, conds)
+}
+
+func assertConditionMessage(t *testing.T, conds []metav1.Condition, condType string, substr string) {
+	t.Helper()
+	for _, c := range conds {
+		if c.Type == condType {
+			if !strings.Contains(c.Message, substr) {
+				t.Errorf("condition %s message %q does not contain %q", condType, c.Message, substr)
+			}
+			return
+		}
+	}
+	t.Errorf("condition %s not found", condType)
 }
 
 // --- SSA Tests ---
@@ -197,7 +274,7 @@ func TestApplyDesired_PreCheck_EmptyKubeContent(t *testing.T) {
 	ctx := context.Background()
 	c := &ApplyDesireController{}
 
-	t.Run("nil kubeContent", func(t *testing.T) {
+	t.Run("nil serverSideApply", func(t *testing.T) {
 		d := newApplyDesire(t, "cm1", configMapTarget("cm1"), nil)
 		_, err := c.applyDesired(ctx, d)
 		var preCheck *conditions.PreCheckError
@@ -208,7 +285,7 @@ func TestApplyDesired_PreCheck_EmptyKubeContent(t *testing.T) {
 
 	t.Run("empty kubeContent", func(t *testing.T) {
 		d := newApplyDesire(t, "cm1", configMapTarget("cm1"), nil)
-		d.Spec.KubeContent = &runtime.RawExtension{Raw: []byte{}}
+		d.Spec.ServerSideApply = &kubeapplier.ServerSideApplyConfig{KubeContent: &runtime.RawExtension{Raw: []byte{}}}
 		_, err := c.applyDesired(ctx, d)
 		var preCheck *conditions.PreCheckError
 		if !errors.As(err, &preCheck) {
@@ -467,6 +544,39 @@ func TestHandleUpdate_UnchangedConsultsCooldown(t *testing.T) {
 	}
 }
 
+func TestHandleUpdate_DeleteDesire_UsesDeleteCooldown(t *testing.T) {
+	now := time.Now()
+	fakeClock := clocktesting.NewFakePassiveClock(now)
+	c := newCadenceController(t, Config{
+		CooldownPeriod:       10 * time.Minute,
+		DeleteCooldownPeriod: 1 * time.Minute,
+		Clock:                fakeClock,
+	})
+	d := newDeleteApplyDesire(t, "cm1", configMapTarget("cm1"))
+
+	// First unchanged update: allowed
+	c.handleUpdate(d, d)
+	if c.queue.Len() != 1 {
+		t.Fatalf("expected 1 item after first unchanged update, got %d", c.queue.Len())
+	}
+	key, _ := c.queue.Get()
+	c.queue.Done(key)
+
+	// Within 1-minute delete cooldown: rejected
+	fakeClock.SetTime(now.Add(30 * time.Second))
+	c.handleUpdate(d, d)
+	if c.queue.Len() != 0 {
+		t.Errorf("expected 0 items within delete cooldown, got %d", c.queue.Len())
+	}
+
+	// After 1-minute delete cooldown: allowed (at 2 minutes, well after the 1-min delete cooldown)
+	fakeClock.SetTime(now.Add(2 * time.Minute))
+	c.handleUpdate(d, d)
+	if c.queue.Len() != 1 {
+		t.Errorf("expected 1 item after delete cooldown, got %d", c.queue.Len())
+	}
+}
+
 func TestHandleAdd_InvalidDesireType_NoQueue(t *testing.T) {
 	c := newCadenceController(t, Config{})
 	c.handleAdd("not a desire")
@@ -540,6 +650,261 @@ func TestApplyDesired_KubeError_WrapsWithContext(t *testing.T) {
 	}
 }
 
+// --- Constant Tests ---
+
+func TestDefaultCooldownPeriod_IsTenMinutes(t *testing.T) {
+	if DefaultCooldownPeriod != 10*time.Minute {
+		t.Errorf("expected 10m, got %v", DefaultCooldownPeriod)
+	}
+}
+
+func TestDefaultDeleteCooldownPeriod_IsOneMinute(t *testing.T) {
+	if DefaultDeleteCooldownPeriod != 1*time.Minute {
+		t.Errorf("expected 1m, got %v", DefaultDeleteCooldownPeriod)
+	}
+}
+
+// =============================================================================
+// evaluateDelete() State Machine Tests
+// =============================================================================
+
+func TestEvaluateDelete_TargetAbsent(t *testing.T) {
+	ctx := context.Background()
+	dyn := fakeDynamic(t, map[schema.GroupVersionResource]string{configMapGVR: "ConfigMapList"})
+
+	d := newDeleteApplyDesire(t, "cm1", configMapTarget("cm1"))
+	c := &ApplyDesireController{dyn: dyn}
+	mutate := c.evaluateDelete(ctx, d)
+
+	mutate(d)
+	assertCondition(t, d.Status.Conditions, kubeapplier.ConditionTypeSuccessful, metav1.ConditionTrue, "")
+}
+
+func TestEvaluateDelete_Target404Race(t *testing.T) {
+	ctx := context.Background()
+	dyn := fakeDynamic(t, map[schema.GroupVersionResource]string{configMapGVR: "ConfigMapList"}, existingConfigMap("cm1"))
+
+	callCount := 0
+	dyn.PrependReactor("delete", "configmaps", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewNotFound(schema.GroupResource{Resource: "configmaps"}, "cm1")
+	})
+	dyn.PrependReactor("get", "configmaps", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		callCount++
+		if callCount == 1 {
+			return true, existingConfigMap("cm1"), nil
+		}
+		return true, nil, apierrors.NewNotFound(schema.GroupResource{Resource: "configmaps"}, "cm1")
+	})
+
+	d := newDeleteApplyDesire(t, "cm1", configMapTarget("cm1"))
+	c := &ApplyDesireController{dyn: dyn}
+	mutate := c.evaluateDelete(ctx, d)
+	mutate(d)
+	assertCondition(t, d.Status.Conditions, kubeapplier.ConditionTypeSuccessful, metav1.ConditionTrue, "")
+}
+
+func TestEvaluateDelete_AlreadyTerminating(t *testing.T) {
+	ctx := context.Background()
+	dyn := fakeDynamic(t, map[schema.GroupVersionResource]string{configMapGVR: "ConfigMapList"})
+	dyn.PrependReactor("get", "configmaps", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		return true, terminatingConfigMap("cm1"), nil
+	})
+
+	d := newDeleteApplyDesire(t, "cm1", configMapTarget("cm1"))
+	c := &ApplyDesireController{dyn: dyn}
+	mutate := c.evaluateDelete(ctx, d)
+	mutate(d)
+	assertCondition(t, d.Status.Conditions, kubeapplier.ConditionTypeSuccessful, metav1.ConditionFalse, kubeapplier.ConditionReasonWaitingForDeletion)
+}
+
+func TestEvaluateDelete_DeleteSucceeds_Terminating(t *testing.T) {
+	ctx := context.Background()
+	dyn := fakeDynamic(t, map[schema.GroupVersionResource]string{configMapGVR: "ConfigMapList"})
+
+	getCount := 0
+	dyn.PrependReactor("get", "configmaps", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		getCount++
+		if getCount == 1 {
+			return true, existingConfigMap("cm1"), nil
+		}
+		return true, terminatingConfigMap("cm1"), nil
+	})
+	dyn.PrependReactor("delete", "configmaps", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, nil
+	})
+
+	d := newDeleteApplyDesire(t, "cm1", configMapTarget("cm1"))
+	c := &ApplyDesireController{dyn: dyn}
+	mutate := c.evaluateDelete(ctx, d)
+	mutate(d)
+	assertCondition(t, d.Status.Conditions, kubeapplier.ConditionTypeSuccessful, metav1.ConditionFalse, kubeapplier.ConditionReasonWaitingForDeletion)
+	assertConditionMessage(t, d.Status.Conditions, kubeapplier.ConditionTypeSuccessful, "test-uid-123")
+}
+
+func TestEvaluateDelete_DeleteSucceeds_ImmediateGone(t *testing.T) {
+	ctx := context.Background()
+	dyn := fakeDynamic(t, map[schema.GroupVersionResource]string{configMapGVR: "ConfigMapList"})
+
+	getCount := 0
+	dyn.PrependReactor("get", "configmaps", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		getCount++
+		if getCount == 1 {
+			return true, existingConfigMap("cm1"), nil
+		}
+		return true, nil, apierrors.NewNotFound(schema.GroupResource{Resource: "configmaps"}, "cm1")
+	})
+	dyn.PrependReactor("delete", "configmaps", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, nil
+	})
+
+	d := newDeleteApplyDesire(t, "cm1", configMapTarget("cm1"))
+	c := &ApplyDesireController{dyn: dyn}
+	mutate := c.evaluateDelete(ctx, d)
+	mutate(d)
+	assertCondition(t, d.Status.Conditions, kubeapplier.ConditionTypeSuccessful, metav1.ConditionTrue, "")
+}
+
+func TestEvaluateDelete_DeleteReturns500(t *testing.T) {
+	ctx := context.Background()
+	dyn := fakeDynamic(t, map[schema.GroupVersionResource]string{configMapGVR: "ConfigMapList"})
+	dyn.PrependReactor("get", "configmaps", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		return true, existingConfigMap("cm1"), nil
+	})
+	dyn.PrependReactor("delete", "configmaps", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, &apierrors.StatusError{ErrStatus: metav1.Status{
+			Status: metav1.StatusFailure, Code: http.StatusInternalServerError,
+			Reason: metav1.StatusReasonInternalError, Message: "internal",
+		}}
+	})
+
+	d := newDeleteApplyDesire(t, "cm1", configMapTarget("cm1"))
+	c := &ApplyDesireController{dyn: dyn}
+	mutate := c.evaluateDelete(ctx, d)
+	mutate(d)
+	assertCondition(t, d.Status.Conditions, kubeapplier.ConditionTypeSuccessful, metav1.ConditionFalse, kubeapplier.ConditionReasonKubeAPIError)
+	assertCondition(t, d.Status.Conditions, kubeapplier.ConditionTypeDegraded, metav1.ConditionTrue, "")
+}
+
+func TestEvaluateDelete_GetReturns500(t *testing.T) {
+	ctx := context.Background()
+	dyn := fakeDynamic(t, map[schema.GroupVersionResource]string{configMapGVR: "ConfigMapList"})
+	dyn.PrependReactor("get", "configmaps", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, &apierrors.StatusError{ErrStatus: metav1.Status{
+			Status: metav1.StatusFailure, Code: http.StatusInternalServerError,
+			Reason: metav1.StatusReasonInternalError, Message: "internal",
+		}}
+	})
+
+	d := newDeleteApplyDesire(t, "cm1", configMapTarget("cm1"))
+	c := &ApplyDesireController{dyn: dyn}
+	mutate := c.evaluateDelete(ctx, d)
+	mutate(d)
+	assertCondition(t, d.Status.Conditions, kubeapplier.ConditionTypeSuccessful, metav1.ConditionFalse, kubeapplier.ConditionReasonKubeAPIError)
+	assertCondition(t, d.Status.Conditions, kubeapplier.ConditionTypeDegraded, metav1.ConditionTrue, "")
+}
+
+func TestEvaluateDelete_PreCheck_MissingFields(t *testing.T) {
+	ctx := context.Background()
+	c := &ApplyDesireController{}
+	tests := []struct {
+		name   string
+		target kubeapplier.ResourceReference
+	}{
+		{"missing version", kubeapplier.ResourceReference{Resource: "configmaps", Name: "cm1"}},
+		{"missing resource", kubeapplier.ResourceReference{Version: "v1", Name: "cm1"}},
+		{"missing name", kubeapplier.ResourceReference{Version: "v1", Resource: "configmaps"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := newDeleteApplyDesire(t, "cm1", tt.target)
+			mutate := c.evaluateDelete(ctx, d)
+			mutate(d)
+			assertCondition(t, d.Status.Conditions, kubeapplier.ConditionTypeSuccessful, metav1.ConditionFalse, kubeapplier.ConditionReasonPreCheckFailed)
+			assertCondition(t, d.Status.Conditions, kubeapplier.ConditionTypeDegraded, metav1.ConditionFalse, "")
+		})
+	}
+}
+
+func TestEvaluateDelete_UnknownType_PreCheckFailed(t *testing.T) {
+	ctx := context.Background()
+
+	specCRUD := listertesting.NewFakeCRUD[kubeapplier.ApplyDesire, *kubeapplier.ApplyDesire]()
+	statusCRUD := listertesting.NewFakeCRUD[kubeapplier.ApplyDesire, *kubeapplier.ApplyDesire]()
+	d := &kubeapplier.ApplyDesire{}
+	d.SetDocumentID("cluster1--cm1")
+	d.SetUpdateTime(time.Unix(1, 0))
+	d.Spec = kubeapplier.ApplyDesireSpec{
+		ManagementCluster: "mc-1",
+		ClusterID:         "cluster1",
+		Type:              "Bogus",
+		TargetItem:        configMapTarget("cm1"),
+	}
+	created, err := specCRUD.Create(ctx, d)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	specFetcher := &applyDesireSpecFetcher{reader: specCRUD}
+	statusFetcher := &applyDesireStatusFetcher{crud: statusCRUD}
+	writer := desirestatuswriter.New[kubeapplier.ApplyDesire, keys.ApplyDesireKey, *kubeapplier.ApplyDesire](
+		statusFetcher, &applyDesireReplacer{crud: statusCRUD}, &applyDesireCreator{crud: statusCRUD},
+	)
+	c := &ApplyDesireController{
+		specFetcher: specFetcher,
+		writer:      writer,
+	}
+
+	key := mustKey(t, created)
+	if err := c.SyncOnce(ctx, key); err != nil {
+		t.Fatalf("SyncOnce: %v", err)
+	}
+
+	updated, err := statusCRUD.Get(ctx, created.DocumentID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	assertCondition(t, updated.Status.Conditions, kubeapplier.ConditionTypeSuccessful, metav1.ConditionFalse, kubeapplier.ConditionReasonPreCheckFailed)
+}
+
+func TestSyncOnce_DeleteDesire_TargetAbsent_Successful(t *testing.T) {
+	ctx := context.Background()
+	dyn := fakeDynamic(t, map[schema.GroupVersionResource]string{configMapGVR: "ConfigMapList"})
+
+	specCRUD := listertesting.NewFakeCRUD[kubeapplier.ApplyDesire, *kubeapplier.ApplyDesire]()
+	statusCRUD := listertesting.NewFakeCRUD[kubeapplier.ApplyDesire, *kubeapplier.ApplyDesire]()
+	d := newDeleteApplyDesire(t, "cm1", configMapTarget("cm1"))
+	created, err := specCRUD.Create(ctx, d)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	specFetcher := &applyDesireSpecFetcher{reader: specCRUD}
+	statusFetcher := &applyDesireStatusFetcher{crud: statusCRUD}
+	writer := desirestatuswriter.New[kubeapplier.ApplyDesire, keys.ApplyDesireKey, *kubeapplier.ApplyDesire](
+		statusFetcher, &applyDesireReplacer{crud: statusCRUD}, &applyDesireCreator{crud: statusCRUD},
+	)
+	c := &ApplyDesireController{
+		specFetcher: specFetcher,
+		dyn:         dyn,
+		writer:      writer,
+	}
+
+	key := mustKey(t, created)
+	if err := c.SyncOnce(ctx, key); err != nil {
+		t.Fatalf("SyncOnce: %v", err)
+	}
+
+	updated, err := statusCRUD.Get(ctx, created.DocumentID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	assertCondition(t, updated.Status.Conditions, kubeapplier.ConditionTypeSuccessful, metav1.ConditionTrue, "")
+	if !updated.Status.ObservedDesireUpdateTime.Equal(created.GetUpdateTime()) {
+		t.Errorf("ObservedDesireUpdateTime: got %v, want %v", updated.Status.ObservedDesireUpdateTime, created.GetUpdateTime())
+	}
+}
+
 // suppress unused import
 var _ = database.IsNotFoundError
 var _ = unstructured.UnstructuredList{}
+var _ = types.UID("")

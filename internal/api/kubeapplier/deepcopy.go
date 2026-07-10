@@ -61,9 +61,9 @@ func (in *ApplyDesire) DeepCopyObject() runtime.Object {
 
 func (in *ApplyDesireSpec) DeepCopyInto(out *ApplyDesireSpec) {
 	*out = *in
-	if in.KubeContent != nil {
-		in, out := &in.KubeContent, &out.KubeContent
-		*out = new(runtime.RawExtension)
+	if in.ServerSideApply != nil {
+		in, out := &in.ServerSideApply, &out.ServerSideApply
+		*out = new(ServerSideApplyConfig)
 		(*in).DeepCopyInto(*out)
 	}
 }
@@ -73,6 +73,24 @@ func (in *ApplyDesireSpec) DeepCopy() *ApplyDesireSpec {
 		return nil
 	}
 	out := new(ApplyDesireSpec)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *ServerSideApplyConfig) DeepCopyInto(out *ServerSideApplyConfig) {
+	*out = *in
+	if in.KubeContent != nil {
+		in, out := &in.KubeContent, &out.KubeContent
+		*out = new(runtime.RawExtension)
+		(*in).DeepCopyInto(*out)
+	}
+}
+
+func (in *ServerSideApplyConfig) DeepCopy() *ServerSideApplyConfig {
+	if in == nil {
+		return nil
+	}
+	out := new(ServerSideApplyConfig)
 	in.DeepCopyInto(out)
 	return out
 }
@@ -122,93 +140,6 @@ func (in *ApplyDesireList) DeepCopy() *ApplyDesireList {
 }
 
 func (in *ApplyDesireList) DeepCopyObject() runtime.Object {
-	if c := in.DeepCopy(); c != nil {
-		return c
-	}
-	return nil
-}
-
-// -- DeleteDesire --
-
-func (in *DeleteDesire) DeepCopyInto(out *DeleteDesire) {
-	*out = *in
-	in.Status.DeepCopyInto(&out.Status)
-}
-
-func (in *DeleteDesire) DeepCopy() *DeleteDesire {
-	if in == nil {
-		return nil
-	}
-	out := new(DeleteDesire)
-	in.DeepCopyInto(out)
-	return out
-}
-
-func (in *DeleteDesire) DeepCopyObject() runtime.Object {
-	if c := in.DeepCopy(); c != nil {
-		return c
-	}
-	return nil
-}
-
-func (in *DeleteDesireSpec) DeepCopyInto(out *DeleteDesireSpec) {
-	*out = *in
-}
-
-func (in *DeleteDesireSpec) DeepCopy() *DeleteDesireSpec {
-	if in == nil {
-		return nil
-	}
-	out := new(DeleteDesireSpec)
-	in.DeepCopyInto(out)
-	return out
-}
-
-func (in *DeleteDesireStatus) DeepCopyInto(out *DeleteDesireStatus) {
-	*out = *in
-	if in.Conditions != nil {
-		in, out := &in.Conditions, &out.Conditions
-		*out = make([]v1.Condition, len(*in))
-		for i := range *in {
-			(*in)[i].DeepCopyInto(&(*out)[i])
-		}
-	}
-}
-
-func (in *DeleteDesireStatus) DeepCopy() *DeleteDesireStatus {
-	if in == nil {
-		return nil
-	}
-	out := new(DeleteDesireStatus)
-	in.DeepCopyInto(out)
-	return out
-}
-
-// -- DeleteDesireList --
-
-func (in *DeleteDesireList) DeepCopyInto(out *DeleteDesireList) {
-	*out = *in
-	out.TypeMeta = in.TypeMeta
-	in.ListMeta.DeepCopyInto(&out.ListMeta)
-	if in.Items != nil {
-		in, out := &in.Items, &out.Items
-		*out = make([]DeleteDesire, len(*in))
-		for i := range *in {
-			(*in)[i].DeepCopyInto(&(*out)[i])
-		}
-	}
-}
-
-func (in *DeleteDesireList) DeepCopy() *DeleteDesireList {
-	if in == nil {
-		return nil
-	}
-	out := new(DeleteDesireList)
-	in.DeepCopyInto(out)
-	return out
-}
-
-func (in *DeleteDesireList) DeepCopyObject() runtime.Object {
 	if c := in.DeepCopy(); c != nil {
 		return c
 	}

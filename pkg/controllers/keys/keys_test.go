@@ -58,33 +58,6 @@ func TestApplyDesireKeyFromDesire_EmptyDocumentID(t *testing.T) {
 	}
 }
 
-func TestDeleteDesireKeyFromDesire(t *testing.T) {
-	d := &kubeapplier.DeleteDesire{
-		DynamoDBMetadata: kubeapplier.DynamoDBMetadata{DocumentID: "del-1"},
-		Spec: kubeapplier.DeleteDesireSpec{
-			ClusterID:  "cluster-b",
-			NodePoolName: "np-2",
-		},
-	}
-	key, err := DeleteDesireKeyFromDesire(d)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if key.ClusterID != "cluster-b" || key.NodePoolName != "np-2" || key.Name != "del-1" {
-		t.Errorf("unexpected key: %+v", key)
-	}
-	if !key.IsNodePoolScoped() {
-		t.Error("should be node-pool-scoped")
-	}
-}
-
-func TestDeleteDesireKeyFromDesire_EmptyDocumentID(t *testing.T) {
-	d := &kubeapplier.DeleteDesire{}
-	_, err := DeleteDesireKeyFromDesire(d)
-	if err == nil {
-		t.Error("expected error for empty DocumentID")
-	}
-}
 
 func TestReadDesireKeyFromDesire(t *testing.T) {
 	d := &kubeapplier.ReadDesire{

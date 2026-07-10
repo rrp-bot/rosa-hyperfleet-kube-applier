@@ -22,25 +22,22 @@ const defaultResyncPeriod = 30 * time.Second
 
 type KubeApplierInformers interface {
 	ApplyDesires() (cache.SharedIndexInformer, listers.ApplyDesireLister)
-	DeleteDesires() (cache.SharedIndexInformer, listers.DeleteDesireLister)
 	ReadDesires() (cache.SharedIndexInformer, listers.ReadDesireLister)
 	RunWithContext(ctx context.Context)
 }
 
 type kubeApplierInformers struct {
-	applyDesireInformer  cache.SharedIndexInformer
-	applyDesireLister    listers.ApplyDesireLister
-	deleteDesireInformer cache.SharedIndexInformer
-	deleteDesireLister   listers.DeleteDesireLister
-	readDesireInformer   cache.SharedIndexInformer
-	readDesireLister     listers.ReadDesireLister
+	applyDesireInformer cache.SharedIndexInformer
+	applyDesireLister   listers.ApplyDesireLister
+	readDesireInformer  cache.SharedIndexInformer
+	readDesireLister    listers.ReadDesireLister
 }
 
 // NewKubeApplierInformers creates informers that watch the specs DynamoDB
 // tables for desire document changes. specsClient is the DynamoDB client for
 // the specs tables; streamsClient is the DynamoDB Streams client used for
 // change notification. specsPrefix is the table name prefix (full table names
-// are prefix + "-applydesires" / "-deletedesires" / "-readdesires").
+// are prefix + "-applydesires" / "-readdesires").
 func NewKubeApplierInformers(
 	specsClient *dynamodb.Client,
 	streamsClient *dynamodbstreams.Client,
@@ -56,7 +53,6 @@ func NewKubeApplierInformersWithResyncPeriod(
 	resyncPeriod time.Duration,
 ) KubeApplierInformers {
 	applyTable := specsPrefix + database.TableSuffixApplyDesires
-	deleteTable := specsPrefix + database.TableSuffixDeleteDesires
 	readTable := specsPrefix + database.TableSuffixReadDesires
 
 	applyInf := newDesireInformer(
@@ -75,30 +71,6 @@ func NewKubeApplierInformersWithResyncPeriod(
 				return nil, err
 			}
 			list := &kubeapplier.ApplyDesireList{}
-			list.ResourceVersion = "0"
-			for _, d := range items {
-				list.Items = append(list.Items, *d)
-			}
-			return list, nil
-		},
-		resyncPeriod,
-	)
-
-	deleteInf := newDesireInformer(
-		specsClient,
-		streamsClient,
-		deleteTable,
-		&kubeapplier.DeleteDesire{},
-		func(item map[string]streamtypes.AttributeValue) (runtime.Object, error) {
-			return database.ItemToDeleteDesire(streamImageToDynamoDBItem(item))
-		},
-		func(ctx context.Context) (runtime.Object, error) {
-			specReader := database.NewDynamoDBKubeApplierDBClient(specsClient, specsClient, specsPrefix, specsPrefix).DeleteDesireSpecs()
-			items, err := specReader.List(ctx)
-			if err != nil {
-				return nil, err
-			}
-			list := &kubeapplier.DeleteDesireList{}
 			list.ResourceVersion = "0"
 			for _, d := range items {
 				list.Items = append(list.Items, *d)
@@ -133,12 +105,10 @@ func NewKubeApplierInformersWithResyncPeriod(
 	)
 
 	return &kubeApplierInformers{
-		applyDesireInformer:  applyInf,
-		applyDesireLister:    listers.NewApplyDesireLister(applyInf.GetIndexer()),
-		deleteDesireInformer: deleteInf,
-		deleteDesireLister:   listers.NewDeleteDesireLister(deleteInf.GetIndexer()),
-		readDesireInformer:   readInf,
-		readDesireLister:     listers.NewReadDesireLister(readInf.GetIndexer()),
+		applyDesireInformer: applyInf,
+		applyDesireLister:   listers.NewApplyDesireLister(applyInf.GetIndexer()),
+		readDesireInformer:  readInf,
+		readDesireLister:    listers.NewReadDesireLister(readInf.GetIndexer()),
 	}
 }
 
@@ -172,10 +142,6 @@ func (k *kubeApplierInformers) ApplyDesires() (cache.SharedIndexInformer, lister
 	return k.applyDesireInformer, k.applyDesireLister
 }
 
-func (k *kubeApplierInformers) DeleteDesires() (cache.SharedIndexInformer, listers.DeleteDesireLister) {
-	return k.deleteDesireInformer, k.deleteDesireLister
-}
-
 func (k *kubeApplierInformers) ReadDesires() (cache.SharedIndexInformer, listers.ReadDesireLister) {
 	return k.readDesireInformer, k.readDesireLister
 }
@@ -183,14 +149,10 @@ func (k *kubeApplierInformers) ReadDesires() (cache.SharedIndexInformer, listers
 func (k *kubeApplierInformers) RunWithContext(ctx context.Context) {
 	var wg sync.WaitGroup
 
-	wg.Add(3)
+	wg.Add(2)
 	go func() {
 		defer wg.Done()
 		k.applyDesireInformer.RunWithContext(ctx)
-	}()
-	go func() {
-		defer wg.Done()
-		k.deleteDesireInformer.RunWithContext(ctx)
 	}()
 	go func() {
 		defer wg.Done()

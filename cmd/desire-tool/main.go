@@ -129,7 +129,7 @@ func newCreateApplyCmd() *cobra.Command {
 					ClusterID:         clusterID,
 					NodePoolName:      nodePool,
 					TargetItem:        ref,
-					KubeContent:       &runtime.RawExtension{Raw: raw},
+					ServerSideApply:   &kubeapplier.ServerSideApplyConfig{KubeContent: &runtime.RawExtension{Raw: raw}},
 				},
 			}
 			desire.SetDocumentID(docID)
@@ -162,7 +162,7 @@ func newCreateDeleteCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "create-delete",
-		Short: "Create a DeleteDesire targeting a specific resource",
+		Short: "Create an ApplyDesire (Type=Delete) targeting a specific resource",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
 			specsDB, _, cleanup := twoDBClients(ctx)
@@ -170,11 +170,12 @@ func newCreateDeleteCmd() *cobra.Command {
 
 			docID := desireid.NewDocumentID(taskKey, group, version, resource, namespace, resourceName)
 
-			desire := &kubeapplier.DeleteDesire{
-				Spec: kubeapplier.DeleteDesireSpec{
+			desire := &kubeapplier.ApplyDesire{
+				Spec: kubeapplier.ApplyDesireSpec{
 					ManagementCluster: "dev-local",
 					ClusterID:         clusterID,
 					NodePoolName:      nodePool,
+					Type:              kubeapplier.ApplyDesireTypeDelete,
 					TargetItem: kubeapplier.ResourceReference{
 						Group:     group,
 						Version:   version,
@@ -186,12 +187,12 @@ func newCreateDeleteCmd() *cobra.Command {
 			}
 			desire.SetDocumentID(docID)
 
-			created, err := specsDB.DeleteDesireStatus().Create(ctx, desire)
+			created, err := specsDB.ApplyDesireStatus().Create(ctx, desire)
 			if err != nil {
-				return fmt.Errorf("creating DeleteDesire: %w", err)
+				return fmt.Errorf("creating ApplyDesire (Delete): %w", err)
 			}
 
-			fmt.Printf("Created DeleteDesire: %s\n", created.GetDocumentID())
+			fmt.Printf("Created ApplyDesire (Type=Delete): %s\n", created.GetDocumentID())
 			fmt.Printf("  Target: %s/%s %s/%s\n", version, resource, namespace, resourceName)
 			return nil
 		},
@@ -310,7 +311,7 @@ func newUpdateApplyCmd() *cobra.Command {
 				return fmt.Errorf("parsing manifest: %w", err)
 			}
 
-			existing.Spec.KubeContent = &runtime.RawExtension{Raw: raw}
+			existing.SetSpecKubeContent(&runtime.RawExtension{Raw: raw})
 			existing.Spec.TargetItem = ref
 
 			updated, err := specsDB.ApplyDesireStatus().Replace(ctx, existing)
@@ -463,9 +464,9 @@ func getApply(ctx context.Context, specsDB, statusDB database.KubeApplierDBClien
 		fmt.Printf("  Node Pool:    %s\n", spec.Spec.NodePoolName)
 	}
 	printTargetItem(spec.Spec.TargetItem)
-	if spec.Spec.KubeContent != nil {
+	if spec.GetSpecKubeContent() != nil {
 		fmt.Printf("  KubeContent:\n")
-		printIndentedJSON(spec.Spec.KubeContent.Raw, 4)
+		printIndentedJSON(spec.GetSpecKubeContent().Raw, 4)
 	}
 
 	status, err := statusDB.ApplyDesireStatus().Get(ctx, docID)
@@ -487,24 +488,24 @@ func getApply(ctx context.Context, specsDB, statusDB database.KubeApplierDBClien
 }
 
 func getDelete(ctx context.Context, specsDB, statusDB database.KubeApplierDBClient, docID string) error {
-	spec, err := specsDB.DeleteDesireSpecs().Get(ctx, docID)
+	spec, err := specsDB.ApplyDesireSpecs().Get(ctx, docID)
 	if err != nil {
-		return fmt.Errorf("getting DeleteDesire spec: %w", err)
+		return fmt.Errorf("getting ApplyDesire (Delete) spec: %w", err)
 	}
-	printDesireHeader("DeleteDesire", spec.GetDocumentID(), spec.GetUpdateTime().String(), spec.GetCreateTime().String())
+	printDesireHeader("ApplyDesire (Type=Delete)", spec.GetDocumentID(), spec.GetUpdateTime().String(), spec.GetCreateTime().String())
 	fmt.Printf("  Cluster ID:   %s\n", spec.Spec.ClusterID)
 	if spec.Spec.NodePoolName != "" {
 		fmt.Printf("  Node Pool:    %s\n", spec.Spec.NodePoolName)
 	}
 	printTargetItem(spec.Spec.TargetItem)
 
-	status, err := statusDB.DeleteDesireStatus().Get(ctx, docID)
+	status, err := statusDB.ApplyDesireStatus().Get(ctx, docID)
 	if err != nil {
 		if database.IsNotFoundError(err) {
 			fmt.Printf("  Status:       (no status document yet)\n")
 			return nil
 		}
-		return fmt.Errorf("getting DeleteDesire status: %w", err)
+		return fmt.Errorf("getting ApplyDesire (Delete) status: %w", err)
 	}
 	if !status.Status.ObservedDesireUpdateTime.IsZero() {
 		fmt.Printf("  ObservedDesireUpdateTime: %s\n", status.Status.ObservedDesireUpdateTime)
@@ -603,12 +604,18 @@ func listApply(ctx context.Context, specsDB database.KubeApplierDBClient) error 
 }
 
 func listDelete(ctx context.Context, specsDB database.KubeApplierDBClient) error {
-	desires, err := specsDB.DeleteDesireSpecs().List(ctx)
+	all, err := specsDB.ApplyDesireSpecs().List(ctx)
 	if err != nil {
-		return fmt.Errorf("listing DeleteDesires: %w", err)
+		return fmt.Errorf("listing ApplyDesires: %w", err)
+	}
+	var desires []*kubeapplier.ApplyDesire
+	for _, d := range all {
+		if d.Spec.Type == kubeapplier.ApplyDesireTypeDelete {
+			desires = append(desires, d)
+		}
 	}
 	if len(desires) == 0 {
-		fmt.Println("No DeleteDesires found.")
+		fmt.Println("No ApplyDesires (Type=Delete) found.")
 		return nil
 	}
 	fmt.Printf("%-40s %-30s\n", "DOCUMENT ID", "TARGET")
@@ -681,7 +688,7 @@ func newDeleteDeleteCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "delete-delete",
-		Short: "Delete a DeleteDesire document from both specs and status tables",
+		Short: "Delete an ApplyDesire (Type=Delete) document from both specs and status tables",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			docID, err := f.resolve()
 			if err != nil {
@@ -692,20 +699,20 @@ func newDeleteDeleteCmd() *cobra.Command {
 			defer cleanup()
 
 			var errs []string
-			if err := specsDB.DeleteDesireStatus().Delete(ctx, docID); err != nil {
+			if err := specsDB.ApplyDesireStatus().Delete(ctx, docID); err != nil {
 				if !database.IsNotFoundError(err) {
 					errs = append(errs, fmt.Sprintf("specs-table: %v", err))
 				}
 			}
-			if err := statusDB.DeleteDesireStatus().Delete(ctx, docID); err != nil {
+			if err := statusDB.ApplyDesireStatus().Delete(ctx, docID); err != nil {
 				if !database.IsNotFoundError(err) {
 					errs = append(errs, fmt.Sprintf("status-table: %v", err))
 				}
 			}
 			if len(errs) > 0 {
-				return fmt.Errorf("deleting DeleteDesire: %s", strings.Join(errs, "; "))
+				return fmt.Errorf("deleting ApplyDesire (Delete): %s", strings.Join(errs, "; "))
 			}
-			fmt.Printf("Deleted DeleteDesire %s\n", docID)
+			fmt.Printf("Deleted ApplyDesire (Type=Delete) %s\n", docID)
 			return nil
 		},
 	}

@@ -17,7 +17,6 @@ const AppShortDescriptionName = "AWS HCP kube-applier"
 
 const (
 	threadsApply       = 4
-	threadsDelete      = 4
 	threadsReadManager = 1
 )
 

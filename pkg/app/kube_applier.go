@@ -21,7 +21,6 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/rrp-bot/kube-applier-aws/pkg/controllers/apply_desire"
-	"github.com/rrp-bot/kube-applier-aws/pkg/controllers/delete_desire"
 	"github.com/rrp-bot/kube-applier-aws/pkg/controllers/read_desire_manager"
 )
 
@@ -119,16 +118,15 @@ func (o *Options) Run(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// runControllersUnderLeaderElection wires the three controllers and runs them
+// runControllersUnderLeaderElection wires the two controllers and runs them
 // inside the leader-election callback. Informers are started inside the
-// callback: a non-leader replica should not be reading Firestore.
+// callback: a non-leader replica should not be reading DynamoDB.
 func (o *Options) runControllersUnderLeaderElection(
 	ctx context.Context, electionChecker *leaderelection.HealthzAdaptor,
 ) error {
 	logger := klog.FromContext(ctx)
 
 	applyInformer, _ := o.Informers.ApplyDesires()
-	deleteInformer, _ := o.Informers.DeleteDesires()
 	readInformer, _ := o.Informers.ReadDesires()
 
 	applyCtl, err := apply_desire.NewApplyDesireController(
@@ -137,13 +135,6 @@ func (o *Options) runControllersUnderLeaderElection(
 		apply_desire.Config{})
 	if err != nil {
 		return fmt.Errorf("apply controller: %w", err)
-	}
-	deleteCtl, err := delete_desire.NewDeleteDesireController(
-		deleteInformer, o.DynamicClient,
-		o.KubeApplierDBClient.DeleteDesireSpecs(), o.KubeApplierDBClient.DeleteDesireStatus(),
-		delete_desire.Config{})
-	if err != nil {
-		return fmt.Errorf("delete controller: %w", err)
 	}
 	readMgr, err := read_desire_manager.NewReadDesireInformerManagingController(
 		readInformer, o.DynamicClient,
@@ -164,13 +155,12 @@ func (o *Options) runControllersUnderLeaderElection(
 				go o.Informers.RunWithContext(ctx)
 
 				if !cache.WaitForCacheSync(ctx.Done(),
-					applyInformer.HasSynced, deleteInformer.HasSynced, readInformer.HasSynced) {
+					applyInformer.HasSynced, readInformer.HasSynced) {
 					logger.Info("informer caches did not sync; aborting controller startup")
 					return
 				}
 
 				go applyCtl.Run(ctx, threadsApply)
-				go deleteCtl.Run(ctx, threadsDelete)
 				go readMgr.Run(ctx, threadsReadManager)
 			},
 			OnStoppedLeading: func() {

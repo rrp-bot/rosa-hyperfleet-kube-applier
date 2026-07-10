@@ -68,25 +68,26 @@ func runDelete(ctx context.Context, clients *clientPair, activeCtx *Context, res
 	ref := resourceRefFromGVR(resInfo, namespace, name)
 	docID := desireid.NewDocumentID(taskKey, ref.Group, ref.Version, ref.Resource, ref.Namespace, ref.Name)
 
-	desire := &kubeapplier.DeleteDesire{
-		Spec: kubeapplier.DeleteDesireSpec{
+	desire := &kubeapplier.ApplyDesire{
+		Spec: kubeapplier.ApplyDesireSpec{
 			ManagementCluster: activeCtx.ManagementCluster,
 			ClusterID:         activeCtx.ClusterID,
 			NodePoolName:      activeCtx.NodePool,
+			Type:              kubeapplier.ApplyDesireTypeDelete,
 			TargetItem:        ref,
 		},
 	}
 	desire.SetDocumentID(docID)
 
-	_, err := clients.specsDB.DeleteDesireStatus().Create(ctx, desire)
+	_, err := clients.specsDB.ApplyDesireStatus().Create(ctx, desire)
 	if err != nil {
 		if database.IsAlreadyExistsError(err) {
-			existing, getErr := clients.specsDB.DeleteDesireStatus().Get(ctx, docID)
+			existing, getErr := clients.specsDB.ApplyDesireStatus().Get(ctx, docID)
 			if getErr != nil {
 				return fmt.Errorf("getting existing delete desire: %w", getErr)
 			}
 			existing.Spec = desire.Spec
-			if _, replaceErr := clients.specsDB.DeleteDesireStatus().Replace(ctx, existing); replaceErr != nil {
+			if _, replaceErr := clients.specsDB.ApplyDesireStatus().Replace(ctx, existing); replaceErr != nil {
 				return fmt.Errorf("updating delete desire: %w", replaceErr)
 			}
 		} else {

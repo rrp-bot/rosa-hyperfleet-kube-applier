@@ -1,11 +1,21 @@
 // Package apply_desire implements the ApplyDesireController.
 //
-// On every sync the controller reads the named ApplyDesire spec from the specs
-// database, decodes spec.kubeContent into an unstructured object, and issues a
-// server-side-apply with Force=true and FieldManager from this package's
-// FieldManager const via the dynamic client. The outcome is recorded on
-// .status.conditions["Successful"] / ["Degraded"] and persisted to the status
-// database via the StatusWriter.
+// The controller handles two operation types via the ApplyDesire.Spec.Type
+// discriminator:
+//
+//   - Type=ServerSideApply: decodes spec.serverSideApply.kubeContent into an
+//     unstructured object and issues a server-side-apply with Force=true and
+//     FieldManager from this package's FieldManager const via the dynamic
+//     client. The outcome is recorded on .status.conditions["Successful"] /
+//     ["Degraded"] and persisted to the status database via the StatusWriter.
+//
+//   - Type=Delete: resolves spec.targetItem to a GVR, gets the object, and
+//     either reports Successful=True if the object is gone, reports
+//     Successful=False (WaitingForDeletion) if it's there and has a
+//     deletionTimestamp (or after issuing a delete that succeeded but the
+//     object hasn't fully gone away yet because of finalizers), or issues a
+//     delete and re-checks the same way. A shorter deleteCooldown (1 minute)
+//     is used for this type to keep polling for finalizer completion.
 package apply_desire
 
 import (
@@ -37,21 +47,32 @@ import (
 const FieldManager = "gcp-hcp-kube-applier"
 
 // DefaultCooldownPeriod is the minimum interval between two reconciles
-// of an unchanged ApplyDesire. Real content changes — Add events and Update
-// events with a different UpdateTime — bypass this gate.
+// of an unchanged ApplyDesire with Type=ServerSideApply. Real content
+// changes — Add events and Update events with a different UpdateTime —
+// bypass this gate.
 const DefaultCooldownPeriod = 10 * time.Minute
+
+// DefaultDeleteCooldownPeriod is the minimum interval between two reconciles
+// of an unchanged ApplyDesire with Type=Delete. 1 minute is shorter than
+// the SSA default because a delete desire in the WaitingForDeletion state
+// needs to keep checking whether finalizers have completed.
+const DefaultDeleteCooldownPeriod = 1 * time.Minute
 
 // Config tunes the ApplyDesireController's cooldown behavior. Zero-valued
 // fields take the Default* constants; tests pass shorter durations and a
 // fake clock.
 type Config struct {
-	CooldownPeriod time.Duration
-	Clock          utilsclock.PassiveClock
+	CooldownPeriod       time.Duration
+	DeleteCooldownPeriod time.Duration
+	Clock                utilsclock.PassiveClock
 }
 
 func (c Config) withDefaults() Config {
 	if c.CooldownPeriod == 0 {
 		c.CooldownPeriod = DefaultCooldownPeriod
+	}
+	if c.DeleteCooldownPeriod == 0 {
+		c.DeleteCooldownPeriod = DefaultDeleteCooldownPeriod
 	}
 	if c.Clock == nil {
 		c.Clock = utilsclock.RealClock{}
@@ -59,15 +80,18 @@ func (c Config) withDefaults() Config {
 	return c
 }
 
-// ApplyDesireController reconciles ApplyDesires by SSA-applying spec.kubeContent.
+// ApplyDesireController reconciles ApplyDesires by SSA-applying
+// spec.serverSideApply.kubeContent (Type=ServerSideApply) or deleting
+// spec.targetItem (Type=Delete).
 //
 // Reconcile cadence:
 //
 //   - Add events queue immediately.
-//   - Update events whose Firestore UpdateTime differs from the previous version
+//   - Update events whose DynamoDB UpdateTime differs from the previous version
 //     queue immediately. UpdateTime-unchanged updates (informer resyncs, or our
 //     own status writes feeding back) are routed through the cooldown gate.
-//   - The cooldown gate lets each key through at most once per CooldownPeriod.
+//   - The cooldown gate lets each key through at most once per CooldownPeriod
+//     (10 min for SSA, 1 min for Delete).
 //   - On error the workqueue's rate limiter requeues the key with backoff.
 type ApplyDesireController struct {
 	name                string
@@ -77,8 +101,9 @@ type ApplyDesireController struct {
 	writer              desirestatuswriter.StatusWriter[kubeapplier.ApplyDesire, keys.ApplyDesireKey]
 	queue               workqueue.TypedRateLimitingInterface[keys.ApplyDesireKey]
 
-	cfg      Config
-	cooldown controllerutils.CooldownChecker
+	cfg            Config
+	cooldown       controllerutils.CooldownChecker
+	deleteCooldown controllerutils.CooldownChecker
 }
 
 // NewApplyDesireController wires up the informer event handler and returns a
@@ -95,6 +120,8 @@ func NewApplyDesireController(
 	statusFetcher := &applyDesireStatusFetcher{crud: statusCRUD}
 	cooldownChecker := controllerutils.NewTimeBasedCooldownChecker(cfg.CooldownPeriod)
 	cooldownChecker.SetClock(cfg.Clock)
+	deleteCooldownChecker := controllerutils.NewTimeBasedCooldownChecker(cfg.DeleteCooldownPeriod)
+	deleteCooldownChecker.SetClock(cfg.Clock)
 	c := &ApplyDesireController{
 		name:                "ApplyDesireController",
 		applyDesireInformer: applyDesireInformer,
@@ -109,8 +136,9 @@ func NewApplyDesireController(
 			workqueue.DefaultTypedControllerRateLimiter[keys.ApplyDesireKey](),
 			workqueue.TypedRateLimitingQueueConfig[keys.ApplyDesireKey]{Name: "ApplyDesireController"},
 		),
-		cfg:      cfg,
-		cooldown: cooldownChecker,
+		cfg:            cfg,
+		cooldown:       cooldownChecker,
+		deleteCooldown: deleteCooldownChecker,
 	}
 
 	if _, err := applyDesireInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -175,7 +203,12 @@ func (c *ApplyDesireController) enqueueWithCooldown(d *kubeapplier.ApplyDesire, 
 		c.queue.Add(key)
 		return
 	}
-	if !c.cooldown.CanSync(context.TODO(), key) {
+	// Delete desires need a shorter cooldown to poll for finalizer completion.
+	cd := c.cooldown
+	if d.Spec.Type == kubeapplier.ApplyDesireTypeDelete {
+		cd = c.deleteCooldown
+	}
+	if !cd.CanSync(context.TODO(), key) {
 		return
 	}
 	c.queue.Add(key)
@@ -215,15 +248,36 @@ func (c *ApplyDesireController) SyncOnce(ctx context.Context, key keys.ApplyDesi
 		return nil
 	}
 
-	appliedGen, syncErr := c.applyDesired(ctx, desire)
+	switch desire.Spec.Type {
+	case kubeapplier.ApplyDesireTypeServerSideApply, "":
+		// Empty type is treated as ServerSideApply for backward compatibility
+		// with documents written before the Type field was introduced.
+		appliedGen, syncErr := c.applyDesired(ctx, desire)
+		return c.writer.UpdateStatus(ctx, key, func(d *kubeapplier.ApplyDesire) {
+			d.SetDocumentID(desire.GetDocumentID())
+			d.Status.ObservedDesireUpdateTime = desire.GetUpdateTime()
+			d.Status.AppliedResourceGeneration = appliedGen
+			conditions.SetSuccessful(&d.Status.Conditions, syncErr)
+			conditions.SetDegraded(&d.Status.Conditions, classifyAsDegraded(syncErr))
+		})
 
-	return c.writer.UpdateStatus(ctx, key, func(d *kubeapplier.ApplyDesire) {
-		d.SetDocumentID(desire.GetDocumentID())
-		d.Status.ObservedDesireUpdateTime = desire.GetUpdateTime()
-		d.Status.AppliedResourceGeneration = appliedGen
-		conditions.SetSuccessful(&d.Status.Conditions, syncErr)
-		conditions.SetDegraded(&d.Status.Conditions, classifyAsDegraded(syncErr))
-	})
+	case kubeapplier.ApplyDesireTypeDelete:
+		mutate := c.evaluateDelete(ctx, desire)
+		return c.writer.UpdateStatus(ctx, key, func(d *kubeapplier.ApplyDesire) {
+			d.SetDocumentID(desire.GetDocumentID())
+			d.Status.ObservedDesireUpdateTime = desire.GetUpdateTime()
+			mutate(d)
+		})
+
+	default:
+		syncErr := conditions.NewPreCheckError(fmt.Errorf("unknown desire type %q", desire.Spec.Type))
+		return c.writer.UpdateStatus(ctx, key, func(d *kubeapplier.ApplyDesire) {
+			d.SetDocumentID(desire.GetDocumentID())
+			d.Status.ObservedDesireUpdateTime = desire.GetUpdateTime()
+			conditions.SetSuccessful(&d.Status.Conditions, syncErr)
+			conditions.SetDegraded(&d.Status.Conditions, nil)
+		})
+	}
 }
 
 func (c *ApplyDesireController) applyDesired(ctx context.Context, d *kubeapplier.ApplyDesire) (int64, error) {
@@ -231,11 +285,11 @@ func (c *ApplyDesireController) applyDesired(ctx context.Context, d *kubeapplier
 	if len(target.Resource) == 0 || len(target.Version) == 0 || len(target.Name) == 0 {
 		return 0, conditions.NewPreCheckError(errors.New("spec.targetItem requires version, resource, and name"))
 	}
-	if d.Spec.KubeContent == nil || len(d.Spec.KubeContent.Raw) == 0 {
-		return 0, conditions.NewPreCheckError(errors.New("spec.kubeContent is empty"))
+	if d.Spec.ServerSideApply == nil || d.Spec.ServerSideApply.KubeContent == nil || len(d.Spec.ServerSideApply.KubeContent.Raw) == 0 {
+		return 0, conditions.NewPreCheckError(errors.New("spec.serverSideApply.kubeContent is empty"))
 	}
 	obj := &unstructured.Unstructured{}
-	if err := obj.UnmarshalJSON(d.Spec.KubeContent.Raw); err != nil {
+	if err := obj.UnmarshalJSON(d.Spec.ServerSideApply.KubeContent.Raw); err != nil {
 		return 0, conditions.NewPreCheckError(fmt.Errorf("decode kubeContent: %w", err))
 	}
 
@@ -254,6 +308,90 @@ func (c *ApplyDesireController) applyDesired(ctx context.Context, d *kubeapplier
 		return 0, fmt.Errorf("server-side apply: %w", applyErr)
 	}
 	return result.GetGeneration(), nil
+}
+
+// evaluateDelete runs the delete state machine for one ApplyDesire with
+// Type=Delete. It returns a MutateFunc that encodes the outcome into the
+// desire's status conditions; any error is captured inside the closure rather
+// than returned directly.
+func (c *ApplyDesireController) evaluateDelete(ctx context.Context, d *kubeapplier.ApplyDesire) desirestatuswriter.MutateFunc[kubeapplier.ApplyDesire] {
+	target := d.Spec.TargetItem
+	if len(target.Resource) == 0 || len(target.Version) == 0 || len(target.Name) == 0 {
+		err := conditions.NewPreCheckError(errors.New("spec.targetItem requires version, resource, and name"))
+		return func(d *kubeapplier.ApplyDesire) {
+			conditions.SetSuccessful(&d.Status.Conditions, err)
+			conditions.SetDegraded(&d.Status.Conditions, classifyAsDegraded(err))
+		}
+	}
+
+	gvr := schema.GroupVersionResource{Group: target.Group, Version: target.Version, Resource: target.Resource}
+	resource := c.dyn.Resource(gvr)
+	var kubeResourceAccessor dynamic.ResourceInterface = resource
+	if len(target.Namespace) > 0 {
+		kubeResourceAccessor = resource.Namespace(target.Namespace)
+	}
+
+	got, getErr := kubeResourceAccessor.Get(ctx, target.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(getErr) {
+		return func(d *kubeapplier.ApplyDesire) {
+			conditions.SetSuccessful(&d.Status.Conditions, nil)
+			conditions.SetDegraded(&d.Status.Conditions, nil)
+		}
+	}
+	if getErr != nil {
+		err := fmt.Errorf("get target: %w", getErr)
+		return func(d *kubeapplier.ApplyDesire) {
+			conditions.SetSuccessful(&d.Status.Conditions, err)
+			conditions.SetDegraded(&d.Status.Conditions, classifyAsDegraded(err))
+		}
+	}
+
+	if dt := got.GetDeletionTimestamp(); dt != nil {
+		uid := got.GetUID()
+		return func(d *kubeapplier.ApplyDesire) {
+			conditions.SetSuccessfulWaitingForDeletion(&d.Status.Conditions, *dt, uid)
+			conditions.SetDegraded(&d.Status.Conditions, nil)
+		}
+	}
+
+	if delErr := kubeResourceAccessor.Delete(ctx, target.Name, metav1.DeleteOptions{}); delErr != nil {
+		if apierrors.IsNotFound(delErr) {
+			return func(d *kubeapplier.ApplyDesire) {
+				conditions.SetSuccessful(&d.Status.Conditions, nil)
+				conditions.SetDegraded(&d.Status.Conditions, nil)
+			}
+		}
+		err := fmt.Errorf("delete target: %w", delErr)
+		return func(d *kubeapplier.ApplyDesire) {
+			conditions.SetSuccessful(&d.Status.Conditions, err)
+			conditions.SetDegraded(&d.Status.Conditions, classifyAsDegraded(err))
+		}
+	}
+
+	post, postErr := kubeResourceAccessor.Get(ctx, target.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(postErr) {
+		return func(d *kubeapplier.ApplyDesire) {
+			conditions.SetSuccessful(&d.Status.Conditions, nil)
+			conditions.SetDegraded(&d.Status.Conditions, nil)
+		}
+	}
+	if postErr != nil {
+		err := fmt.Errorf("post-delete get: %w", postErr)
+		return func(d *kubeapplier.ApplyDesire) {
+			conditions.SetSuccessful(&d.Status.Conditions, err)
+			conditions.SetDegraded(&d.Status.Conditions, classifyAsDegraded(err))
+		}
+	}
+	dt := post.GetDeletionTimestamp()
+	uid := post.GetUID()
+	if dt == nil {
+		now := metav1.NewTime(time.Now())
+		dt = &now
+	}
+	return func(d *kubeapplier.ApplyDesire) {
+		conditions.SetSuccessfulWaitingForDeletion(&d.Status.Conditions, *dt, uid)
+		conditions.SetDegraded(&d.Status.Conditions, nil)
+	}
 }
 
 func classifyAsDegraded(err error) error {

@@ -86,35 +86,6 @@ func TestListerGetNotFound(t *testing.T) {
 	}
 }
 
-func TestDeleteDesireListerFromPopulatedCache(t *testing.T) {
-	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
-	d := &kubeapplier.DeleteDesire{
-		DynamoDBMetadata: kubeapplier.DynamoDBMetadata{DocumentID: "c1--del1"},
-		Spec:             kubeapplier.DeleteDesireSpec{ClusterID: "c1"},
-	}
-	if err := indexer.Add(d); err != nil {
-		t.Fatalf("indexer.Add: %v", err)
-	}
-
-	lister := listers.NewDeleteDesireLister(indexer)
-
-	got, err := lister.Get("c1--del1")
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	if got.Spec.ClusterID != "c1" {
-		t.Errorf("ClusterID = %q, want %q", got.Spec.ClusterID, "c1")
-	}
-
-	items, err := lister.List()
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(items) != 1 {
-		t.Errorf("List returned %d items, want 1", len(items))
-	}
-}
-
 func TestReadDesireListerFromPopulatedCache(t *testing.T) {
 	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
 	d := &kubeapplier.ReadDesire{
@@ -200,9 +171,8 @@ func startAndSync(t *testing.T, ctx context.Context, info KubeApplierInformers) 
 	t.Helper()
 	go info.RunWithContext(ctx)
 	applyInf, _ := info.ApplyDesires()
-	deleteInf, _ := info.DeleteDesires()
 	readInf, _ := info.ReadDesires()
-	if !cache.WaitForCacheSync(ctx.Done(), applyInf.HasSynced, deleteInf.HasSynced, readInf.HasSynced) {
+	if !cache.WaitForCacheSync(ctx.Done(), applyInf.HasSynced, readInf.HasSynced) {
 		t.Fatal("informers did not sync")
 	}
 }

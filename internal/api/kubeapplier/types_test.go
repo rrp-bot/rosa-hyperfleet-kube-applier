@@ -20,6 +20,7 @@ func newTestApplyDesire() *ApplyDesire {
 			ManagementCluster: "mc-dev-westus3-1",
 			ClusterID:         "cluster-a",
 			NodePoolName:      "np-1",
+			Type:              ApplyDesireTypeServerSideApply,
 			TargetItem: ResourceReference{
 				Group:     "",
 				Version:   "v1",
@@ -27,8 +28,10 @@ func newTestApplyDesire() *ApplyDesire {
 				Namespace: "default",
 				Name:      "my-cm",
 			},
-			KubeContent: &runtime.RawExtension{
-				Raw: []byte(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"my-cm","namespace":"default"}}`),
+			ServerSideApply: &ServerSideApplyConfig{
+				KubeContent: &runtime.RawExtension{
+					Raw: []byte(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"my-cm","namespace":"default"}}`),
+				},
 			},
 		},
 		Status: ApplyDesireStatus{
@@ -52,7 +55,7 @@ func TestApplyDesire_DeepCopy_Isolation(t *testing.T) {
 	// Mutate the copy
 	copied.DocumentID = "changed"
 	copied.Spec.ClusterID = "changed-cluster"
-	copied.Spec.KubeContent.Raw = []byte(`{}`)
+	copied.Spec.ServerSideApply.KubeContent.Raw = []byte(`{}`)
 	copied.Status.Conditions[0].Reason = "Changed"
 	copied.Status.ObservedDesireUpdateTime = time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)
 	copied.Status.AppliedResourceGeneration = 999
@@ -64,7 +67,7 @@ func TestApplyDesire_DeepCopy_Isolation(t *testing.T) {
 	if original.Spec.ClusterID != "cluster-a" {
 		t.Errorf("original ClusterID mutated: %s", original.Spec.ClusterID)
 	}
-	if string(original.Spec.KubeContent.Raw) == "{}" {
+	if string(original.Spec.ServerSideApply.KubeContent.Raw) == "{}" {
 		t.Error("original KubeContent.Raw mutated")
 	}
 	if original.Status.Conditions[0].Reason != ConditionReasonNoErrors {
@@ -127,26 +130,6 @@ func TestApplyDesire_RuntimeObject(t *testing.T) {
 	}
 }
 
-func TestDeleteDesire_DeepCopy_Isolation(t *testing.T) {
-	original := &DeleteDesire{
-		DynamoDBMetadata: DynamoDBMetadata{DocumentID: "my-delete-desire"},
-		Spec: DeleteDesireSpec{
-			ClusterID:  "cluster-a",
-			TargetItem: ResourceReference{Version: "v1", Resource: "configmaps", Name: "x"},
-		},
-		Status: DeleteDesireStatus{
-			Conditions:               []metav1.Condition{{Type: ConditionTypeSuccessful, Status: metav1.ConditionTrue}},
-			ObservedDesireUpdateTime: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC),
-		},
-	}
-	copied := original.DeepCopy()
-	copied.Status.Conditions[0].Status = metav1.ConditionFalse
-
-	if original.Status.Conditions[0].Status != metav1.ConditionTrue {
-		t.Error("original condition status mutated")
-	}
-}
-
 func TestReadDesire_DeepCopy_Isolation(t *testing.T) {
 	original := &ReadDesire{
 		DynamoDBMetadata: DynamoDBMetadata{DocumentID: "my-read-desire"},
@@ -174,7 +157,6 @@ func TestListTypes_RuntimeObject(t *testing.T) {
 		obj  runtime.Object
 	}{
 		{"ApplyDesireList", &ApplyDesireList{Items: []ApplyDesire{*newTestApplyDesire()}}},
-		{"DeleteDesireList", &DeleteDesireList{}},
 		{"ReadDesireList", &ReadDesireList{}},
 	}
 	for _, tt := range tests {

@@ -9,12 +9,12 @@ import (
 // Table name suffixes appended to the specs/status prefix supplied at startup.
 const (
 	TableSuffixApplyDesires  = "-applydesires"
-	TableSuffixDeleteDesires = "-deletedesires"
+	TableSuffixDeleteDesires = "-deletedesires" // kept for integration test table setup; no longer read by the agent
 	TableSuffixReadDesires   = "-readdesires"
 )
 
 // dynamoDBKubeApplierDBClient wraps two DynamoDB clients (one for specs tables,
-// one for status tables) and derives the six table names from the two prefixes.
+// one for status tables) and derives the table names from the two prefixes.
 type dynamoDBKubeApplierDBClient struct {
 	specsClient  *dynamodb.Client
 	statusClient *dynamodb.Client
@@ -43,13 +43,6 @@ func (c *dynamoDBKubeApplierDBClient) ApplyDesireSpecs() SpecReader[kubeapplier.
 	}
 }
 
-func (c *dynamoDBKubeApplierDBClient) DeleteDesireSpecs() SpecReader[kubeapplier.DeleteDesire] {
-	return &dynamoDBSpecReader[kubeapplier.DeleteDesire, *kubeapplier.DeleteDesire]{
-		client: c.specsClient,
-		table:  c.specsPrefix + TableSuffixDeleteDesires,
-	}
-}
-
 func (c *dynamoDBKubeApplierDBClient) ReadDesireSpecs() SpecReader[kubeapplier.ReadDesire] {
 	return &dynamoDBSpecReader[kubeapplier.ReadDesire, *kubeapplier.ReadDesire]{
 		client: c.specsClient,
@@ -61,13 +54,6 @@ func (c *dynamoDBKubeApplierDBClient) ApplyDesireStatus() ResourceCRUD[kubeappli
 	return &dynamoDBDesireCRUD[kubeapplier.ApplyDesire, *kubeapplier.ApplyDesire]{
 		client: c.statusClient,
 		table:  c.statusPrefix + TableSuffixApplyDesires,
-	}
-}
-
-func (c *dynamoDBKubeApplierDBClient) DeleteDesireStatus() ResourceCRUD[kubeapplier.DeleteDesire] {
-	return &dynamoDBDesireCRUD[kubeapplier.DeleteDesire, *kubeapplier.DeleteDesire]{
-		client: c.statusClient,
-		table:  c.statusPrefix + TableSuffixDeleteDesires,
 	}
 }
 

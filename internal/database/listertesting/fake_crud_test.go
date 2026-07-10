@@ -22,7 +22,9 @@ func newTestApplyDesire(docID string) *kubeapplier.ApplyDesire {
 				Resource: "configmaps",
 				Name:     "test-cm",
 			},
-			KubeContent: &runtime.RawExtension{Raw: []byte(`{"apiVersion":"v1","kind":"ConfigMap"}`)},
+			ServerSideApply: &kubeapplier.ServerSideApplyConfig{
+				KubeContent: &runtime.RawExtension{Raw: []byte(`{"apiVersion":"v1","kind":"ConfigMap"}`)},
+			},
 		},
 	}
 }
@@ -257,12 +259,13 @@ func TestFakeCRUD_DeterministicUpdateTimes(t *testing.T) {
 
 func TestFakeCRUD_DeleteDesireType(t *testing.T) {
 	ctx := context.Background()
-	crud := NewFakeCRUD[kubeapplier.DeleteDesire, *kubeapplier.DeleteDesire]()
-	d := &kubeapplier.DeleteDesire{
+	crud := NewFakeCRUD[kubeapplier.ApplyDesire, *kubeapplier.ApplyDesire]()
+	d := &kubeapplier.ApplyDesire{
 		DynamoDBMetadata: kubeapplier.DynamoDBMetadata{DocumentID: "cluster1--del1"},
-		Spec: kubeapplier.DeleteDesireSpec{
+		Spec: kubeapplier.ApplyDesireSpec{
 			ManagementCluster: "mc-test",
 			ClusterID:         "cluster1",
+			Type:              kubeapplier.ApplyDesireTypeDelete,
 			TargetItem: kubeapplier.ResourceReference{
 				Version:  "v1",
 				Resource: "configmaps",
@@ -280,6 +283,9 @@ func TestFakeCRUD_DeleteDesireType(t *testing.T) {
 	}
 	if got.DocumentID != created.DocumentID {
 		t.Errorf("DocumentID mismatch: %q vs %q", got.DocumentID, created.DocumentID)
+	}
+	if got.Spec.Type != kubeapplier.ApplyDesireTypeDelete {
+		t.Errorf("Type = %q, want %q", got.Spec.Type, kubeapplier.ApplyDesireTypeDelete)
 	}
 }
 
@@ -339,14 +345,6 @@ func TestFakeClient_ImplementsInterface(t *testing.T) {
 		t.Fatalf("ApplyDesireStatus().Create: %v", err)
 	}
 
-	dd := &kubeapplier.DeleteDesire{
-		DynamoDBMetadata: kubeapplier.DynamoDBMetadata{DocumentID: "cluster1--del1"},
-		Spec:             kubeapplier.DeleteDesireSpec{ClusterID: "cluster1"},
-	}
-	if _, err := client.DeleteDesireStatus().Create(ctx, dd); err != nil {
-		t.Fatalf("DeleteDesireStatus().Create: %v", err)
-	}
-
 	rd := &kubeapplier.ReadDesire{
 		DynamoDBMetadata: kubeapplier.DynamoDBMetadata{DocumentID: "cluster1--read1"},
 		Spec:             kubeapplier.ReadDesireSpec{ClusterID: "cluster1"},
@@ -368,12 +366,12 @@ func TestFakeClient_CollectionsAreIsolated(t *testing.T) {
 	if _, err := client.ApplyDesireStatus().Create(ctx, d); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	// Same DocumentID in DeleteDesires should not conflict.
-	dd := &kubeapplier.DeleteDesire{
+	// Same DocumentID in ReadDesires should not conflict.
+	rd := &kubeapplier.ReadDesire{
 		DynamoDBMetadata: kubeapplier.DynamoDBMetadata{DocumentID: "cluster1--cm1"},
-		Spec:             kubeapplier.DeleteDesireSpec{ClusterID: "cluster1"},
+		Spec:             kubeapplier.ReadDesireSpec{ClusterID: "cluster1"},
 	}
-	if _, err := client.DeleteDesireStatus().Create(ctx, dd); err != nil {
-		t.Fatalf("DeleteDesireStatus().Create should not conflict with ApplyDesireStatus: %v", err)
+	if _, err := client.ReadDesireStatus().Create(ctx, rd); err != nil {
+		t.Fatalf("ReadDesireStatus().Create should not conflict with ApplyDesireStatus: %v", err)
 	}
 }

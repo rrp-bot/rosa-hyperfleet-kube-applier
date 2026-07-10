@@ -44,7 +44,7 @@ func newTestClients(t *testing.T) (*dynamodb.Client, KubeApplierDBClient, string
 	dbClient := dynamodb.NewFromConfig(cfg)
 	prefix := fmt.Sprintf("test-%d", time.Now().UnixNano())
 
-	for _, suffix := range []string{TableSuffixApplyDesires, TableSuffixDeleteDesires, TableSuffixReadDesires} {
+	for _, suffix := range []string{TableSuffixApplyDesires, TableSuffixReadDesires} {
 		tableName := prefix + suffix
 		createTable(t, dbClient, tableName)
 	}
@@ -96,8 +96,10 @@ func TestIntegration_ApplyDesireCRUDRoundTrip(t *testing.T) {
 				Resource: "configmaps",
 				Name:     "test-cm",
 			},
-			KubeContent: &runtime.RawExtension{
-				Raw: []byte(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"test-cm"},"data":{"key":"value"}}`),
+			ServerSideApply: &kubeapplier.ServerSideApplyConfig{
+				KubeContent: &runtime.RawExtension{
+					Raw: []byte(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"test-cm"},"data":{"key":"value"}}`),
+				},
 			},
 		},
 		Status: kubeapplier.ApplyDesireStatus{
@@ -181,13 +183,14 @@ func TestIntegration_DeleteDesireCRUDRoundTrip(t *testing.T) {
 	requireLocalStack(t)
 	ctx := context.Background()
 	_, dbClient, _ := newTestClients(t)
-	crud := dbClient.DeleteDesireStatus()
+	crud := dbClient.ApplyDesireStatus()
 
-	d := &kubeapplier.DeleteDesire{
+	d := &kubeapplier.ApplyDesire{
 		DynamoDBMetadata: kubeapplier.DynamoDBMetadata{DocumentID: "cluster1--del1"},
-		Spec: kubeapplier.DeleteDesireSpec{
+		Spec: kubeapplier.ApplyDesireSpec{
 			ManagementCluster: "mc-test",
 			ClusterID:         "cluster1",
+			Type:              kubeapplier.ApplyDesireTypeDelete,
 			TargetItem: kubeapplier.ResourceReference{
 				Version:  "v1",
 				Resource: "configmaps",
@@ -206,6 +209,9 @@ func TestIntegration_DeleteDesireCRUDRoundTrip(t *testing.T) {
 	}
 	if got.Version != created.Version {
 		t.Errorf("Version mismatch: got %d, want %d", got.Version, created.Version)
+	}
+	if got.Spec.Type != kubeapplier.ApplyDesireTypeDelete {
+		t.Errorf("Type = %q, want %q", got.Spec.Type, kubeapplier.ApplyDesireTypeDelete)
 	}
 	if err := crud.Delete(ctx, "cluster1--del1"); err != nil {
 		t.Fatalf("Delete: %v", err)
@@ -322,7 +328,9 @@ func TestIntegration_RawExtensionRoundTrip(t *testing.T) {
 				Resource: "configmaps",
 				Name:     "test",
 			},
-			KubeContent: &runtime.RawExtension{Raw: rawJSON},
+			ServerSideApply: &kubeapplier.ServerSideApplyConfig{
+				KubeContent: &runtime.RawExtension{Raw: rawJSON},
+			},
 		},
 	}
 
@@ -335,7 +343,7 @@ func TestIntegration_RawExtensionRoundTrip(t *testing.T) {
 		t.Fatalf("Get: %v", err)
 	}
 
-	if got.Spec.KubeContent == nil {
+	if got.GetSpecKubeContent() == nil {
 		t.Fatal("KubeContent is nil after round-trip")
 	}
 	// DynamoDB stores JSON as a string; compare JSON equivalence (not byte equality).
@@ -343,7 +351,7 @@ func TestIntegration_RawExtensionRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(rawJSON, &original); err != nil {
 		t.Fatalf("unmarshal original: %v", err)
 	}
-	if err := json.Unmarshal(got.Spec.KubeContent.Raw, &roundTripped); err != nil {
+	if err := json.Unmarshal(got.GetSpecKubeContent().Raw, &roundTripped); err != nil {
 		t.Fatalf("unmarshal roundTripped: %v", err)
 	}
 	origBytes, _ := json.Marshal(original)
@@ -456,10 +464,10 @@ func TestIntegration_PerTableIsolation(t *testing.T) {
 		t.Fatalf("Create ApplyDesire: %v", err)
 	}
 
-	// Same document ID in DeleteDesires should not conflict — different table.
-	dd := &kubeapplier.DeleteDesire{
+	// Same document ID in ReadDesires should not conflict — different table.
+	rd := &kubeapplier.ReadDesire{
 		DynamoDBMetadata: kubeapplier.DynamoDBMetadata{DocumentID: "cluster1--shared-id"},
-		Spec: kubeapplier.DeleteDesireSpec{
+		Spec: kubeapplier.ReadDesireSpec{
 			ManagementCluster: "mc-test",
 			ClusterID:         "cluster1",
 			TargetItem: kubeapplier.ResourceReference{
@@ -469,23 +477,23 @@ func TestIntegration_PerTableIsolation(t *testing.T) {
 			},
 		},
 	}
-	if _, err := dbClient.DeleteDesireStatus().Create(ctx, dd); err != nil {
-		t.Fatalf("Create DeleteDesire should not conflict: %v", err)
+	if _, err := dbClient.ReadDesireStatus().Create(ctx, rd); err != nil {
+		t.Fatalf("Create ReadDesire should not conflict: %v", err)
 	}
 
 	applyList, err := dbClient.ApplyDesireStatus().List(ctx)
 	if err != nil {
 		t.Fatalf("ApplyDesires.List: %v", err)
 	}
-	deleteList, err := dbClient.DeleteDesireStatus().List(ctx)
+	readList, err := dbClient.ReadDesireStatus().List(ctx)
 	if err != nil {
-		t.Fatalf("DeleteDesires.List: %v", err)
+		t.Fatalf("ReadDesires.List: %v", err)
 	}
 	if len(applyList) != 1 {
 		t.Errorf("expected 1 ApplyDesire, got %d", len(applyList))
 	}
-	if len(deleteList) != 1 {
-		t.Errorf("expected 1 DeleteDesire, got %d", len(deleteList))
+	if len(readList) != 1 {
+		t.Errorf("expected 1 ReadDesire, got %d", len(readList))
 	}
 }
 
