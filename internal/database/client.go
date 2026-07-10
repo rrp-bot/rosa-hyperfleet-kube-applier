@@ -8,9 +8,8 @@ import (
 
 // Table name suffixes appended to the specs/status prefix supplied at startup.
 const (
-	TableSuffixApplyDesires  = "-applydesires"
-	TableSuffixDeleteDesires = "-deletedesires" // kept for integration test table setup; no longer read by the agent
-	TableSuffixReadDesires   = "-readdesires"
+	TableSuffixApplyDesires = "-applydesires"
+	TableSuffixReadDesires  = "-readdesires"
 )
 
 // dynamoDBKubeApplierDBClient wraps two DynamoDB clients (one for specs tables,

@@ -111,7 +111,6 @@ func newFixture(t *testing.T, localstackEndpoint, kubeconfigPath string) *fixtur
 	for _, p := range []string{specsPrefix, statusPrefix} {
 		for _, suffix := range []string{
 			database.TableSuffixApplyDesires,
-			database.TableSuffixDeleteDesires,
 			database.TableSuffixReadDesires,
 		} {
 			createTable(t, dynDB, p+suffix)
