@@ -15,7 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodbstreams"
 	"k8s.io/client-go/tools/cache"
 
-	kubeapplier "github.com/rrp-bot/kube-applier-aws/internal/api/kubeapplier"
+	kubeapplier "github.com/rrp-bot/kube-applier-aws/api/kubeapplier"
 	"github.com/rrp-bot/kube-applier-aws/internal/database"
 	"github.com/rrp-bot/kube-applier-aws/internal/database/listers"
 )

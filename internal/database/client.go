@@ -3,7 +3,7 @@ package database
 import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 
-	kubeapplier "github.com/rrp-bot/kube-applier-aws/internal/api/kubeapplier"
+	kubeapplier "github.com/rrp-bot/kube-applier-aws/api/kubeapplier"
 )
 
 // Table name suffixes appended to the specs/status prefix supplied at startup.

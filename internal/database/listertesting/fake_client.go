@@ -1,7 +1,7 @@
 package listertesting
 
 import (
-	kubeapplier "github.com/rrp-bot/kube-applier-aws/internal/api/kubeapplier"
+	kubeapplier "github.com/rrp-bot/kube-applier-aws/api/kubeapplier"
 	"github.com/rrp-bot/kube-applier-aws/internal/database"
 )
 

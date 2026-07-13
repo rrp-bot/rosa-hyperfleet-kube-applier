@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	kubeapplier "github.com/rrp-bot/kube-applier-aws/internal/api/kubeapplier"
+	kubeapplier "github.com/rrp-bot/kube-applier-aws/api/kubeapplier"
 	sigsyaml "sigs.k8s.io/yaml"
 )
 

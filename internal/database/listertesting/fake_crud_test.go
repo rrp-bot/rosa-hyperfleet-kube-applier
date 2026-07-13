@@ -7,7 +7,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
-	kubeapplier "github.com/rrp-bot/kube-applier-aws/internal/api/kubeapplier"
+	kubeapplier "github.com/rrp-bot/kube-applier-aws/api/kubeapplier"
 	"github.com/rrp-bot/kube-applier-aws/internal/database"
 )
 

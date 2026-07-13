@@ -20,7 +20,7 @@ import (
 	"k8s.io/klog/v2"
 	utilsclock "k8s.io/utils/clock"
 
-	"github.com/rrp-bot/kube-applier-aws/internal/api/kubeapplier"
+	"github.com/rrp-bot/kube-applier-aws/api/kubeapplier"
 	controllerutil "github.com/rrp-bot/kube-applier-aws/internal/controllerutils"
 	"github.com/rrp-bot/kube-applier-aws/internal/database"
 	"github.com/rrp-bot/kube-applier-aws/pkg/controllers/conditions"

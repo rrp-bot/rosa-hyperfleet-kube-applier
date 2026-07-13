@@ -20,7 +20,7 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	clocktesting "k8s.io/utils/clock/testing"
 
-	"github.com/rrp-bot/kube-applier-aws/internal/api/kubeapplier"
+	"github.com/rrp-bot/kube-applier-aws/api/kubeapplier"
 	"github.com/rrp-bot/kube-applier-aws/internal/controllerutils"
 	"github.com/rrp-bot/kube-applier-aws/internal/database"
 	"github.com/rrp-bot/kube-applier-aws/internal/database/listertesting"

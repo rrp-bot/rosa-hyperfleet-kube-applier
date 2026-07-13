@@ -6,7 +6,7 @@ package keys
 import (
 	"fmt"
 
-	"github.com/rrp-bot/kube-applier-aws/internal/api/kubeapplier"
+	"github.com/rrp-bot/kube-applier-aws/api/kubeapplier"
 )
 
 // ApplyDesireKey identifies a single ApplyDesire. It is used for both

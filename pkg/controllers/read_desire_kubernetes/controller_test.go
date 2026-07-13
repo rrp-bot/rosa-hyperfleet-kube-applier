@@ -12,7 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/cache"
 
-	"github.com/rrp-bot/kube-applier-aws/internal/api/kubeapplier"
+	"github.com/rrp-bot/kube-applier-aws/api/kubeapplier"
 	"github.com/rrp-bot/kube-applier-aws/internal/database/listertesting"
 	"github.com/rrp-bot/kube-applier-aws/pkg/controllers/conditions"
 	"github.com/rrp-bot/kube-applier-aws/pkg/controllers/desirestatuswriter"

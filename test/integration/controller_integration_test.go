@@ -43,7 +43,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 
-	kubeapplier "github.com/rrp-bot/kube-applier-aws/internal/api/kubeapplier"
+	kubeapplier "github.com/rrp-bot/kube-applier-aws/api/kubeapplier"
 	"github.com/rrp-bot/kube-applier-aws/internal/database"
 	"github.com/rrp-bot/kube-applier-aws/internal/database/informers"
 	"github.com/rrp-bot/kube-applier-aws/pkg/app"

@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	kubeapplier "github.com/rrp-bot/kube-applier-aws/internal/api/kubeapplier"
+	kubeapplier "github.com/rrp-bot/kube-applier-aws/api/kubeapplier"
 )
 
 // DynamoDBMetadataAccessor provides generic access to the DynamoDB-specific
