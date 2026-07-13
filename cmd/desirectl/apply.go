@@ -101,7 +101,7 @@ func applyManifest(ctx context.Context, clients *clientPair, activeCtx *Context,
 			ClusterID:         activeCtx.ClusterID,
 			NodePoolName:      activeCtx.NodePool,
 			TargetItem:        ref,
-			KubeContent:       &runtime.RawExtension{Raw: raw},
+			ServerSideApply:   &kubeapplier.ServerSideApplyConfig{KubeContent: &runtime.RawExtension{Raw: raw}},
 		},
 	}
 	desire.SetDocumentID(docID)
@@ -120,7 +120,7 @@ func applyManifest(ctx context.Context, clients *clientPair, activeCtx *Context,
 		return "", displayName, fmt.Errorf("getting %s for update: %w", displayName, err)
 	}
 
-	existing.Spec.KubeContent = &runtime.RawExtension{Raw: raw}
+	existing.Spec.ServerSideApply = &kubeapplier.ServerSideApplyConfig{KubeContent: &runtime.RawExtension{Raw: raw}}
 	existing.Spec.TargetItem = ref
 	existing.Spec.ManagementCluster = activeCtx.ManagementCluster
 	existing.Spec.ClusterID = activeCtx.ClusterID

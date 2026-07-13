@@ -201,10 +201,8 @@ func TestIntegration_InformerSyncsExistingDocuments(t *testing.T) {
 	prefix := fmt.Sprintf("inf-existing-%d", time.Now().UnixNano())
 
 	applyTable := prefix + database.TableSuffixApplyDesires
-	deleteTable := prefix + database.TableSuffixDeleteDesires
 	readTable := prefix + database.TableSuffixReadDesires
 	createTestTable(t, dbClient, applyTable)
-	createTestTable(t, dbClient, deleteTable)
 	createTestTable(t, dbClient, readTable)
 
 	dbCRUD := database.NewDynamoDBKubeApplierDBClient(dbClient, dbClient, prefix, prefix)
@@ -261,10 +259,8 @@ func TestIntegration_StreamDeliversEvents(t *testing.T) {
 	prefix := fmt.Sprintf("inf-stream-%d", time.Now().UnixNano())
 
 	applyTable := prefix + database.TableSuffixApplyDesires
-	deleteTable := prefix + database.TableSuffixDeleteDesires
 	readTable := prefix + database.TableSuffixReadDesires
 	createTestTable(t, dbClient, applyTable)
-	createTestTable(t, dbClient, deleteTable)
 	createTestTable(t, dbClient, readTable)
 
 	dbCRUD := database.NewDynamoDBKubeApplierDBClient(dbClient, dbClient, prefix, prefix)
@@ -334,7 +330,6 @@ func TestIntegration_PerTableIsolation(t *testing.T) {
 
 	for _, prefix := range []string{prefixA, prefixB} {
 		createTestTable(t, dbClient, prefix+database.TableSuffixApplyDesires)
-		createTestTable(t, dbClient, prefix+database.TableSuffixDeleteDesires)
 		createTestTable(t, dbClient, prefix+database.TableSuffixReadDesires)
 	}
 
