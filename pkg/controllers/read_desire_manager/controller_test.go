@@ -7,11 +7,13 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 	clocktesting "k8s.io/utils/clock/testing"
 
 	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/api/kubeapplier"
 	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/internal/controllerutils"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/internal/database"
 	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/internal/database/listertesting"
 	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/pkg/controllers/conditions"
 	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/pkg/controllers/desirestatuswriter"
@@ -421,11 +423,62 @@ func TestHandleUpdate_UnchangedConsultsCooldown(t *testing.T) {
 	}
 }
 
-func TestHandleDelete_QueuesImmediately(t *testing.T) {
-	c := newCadenceController(t, Config{})
+func TestHandleDelete_DeletesStatusRecord(t *testing.T) {
+	ctx := context.Background()
+	statusCRUD := listertesting.NewFakeCRUD[kubeapplier.ReadDesire, *kubeapplier.ReadDesire]()
 	d := newReadDesire(t, configMapTarget("x"))
-	c.handleDelete(d)
-	if c.queue.Len() != 1 {
-		t.Errorf("expected 1 item, got %d", c.queue.Len())
+	if _, err := statusCRUD.Create(ctx, d); err != nil {
+		t.Fatalf("create status: %v", err)
 	}
+
+	c := &ReadDesireInformerManagingController{
+		statusCRUD: statusCRUD,
+		running:    map[keys.ReadDesireKey]*runningInstance{},
+	}
+	c.handleDelete(d)
+
+	if _, err := statusCRUD.Get(ctx, d.GetDocumentID()); !database.IsNotFoundError(err) {
+		t.Errorf("expected status record to be deleted, got err: %v", err)
+	}
+}
+
+func TestHandleDelete_StatusAlreadyGone_NoError(t *testing.T) {
+	statusCRUD := listertesting.NewFakeCRUD[kubeapplier.ReadDesire, *kubeapplier.ReadDesire]()
+	c := &ReadDesireInformerManagingController{
+		statusCRUD: statusCRUD,
+		running:    map[keys.ReadDesireKey]*runningInstance{},
+	}
+	d := newReadDesire(t, configMapTarget("x"))
+	// Should not panic.
+	c.handleDelete(d)
+}
+
+func TestHandleDelete_Tombstone_DeletesStatusRecord(t *testing.T) {
+	ctx := context.Background()
+	statusCRUD := listertesting.NewFakeCRUD[kubeapplier.ReadDesire, *kubeapplier.ReadDesire]()
+	d := newReadDesire(t, configMapTarget("x"))
+	if _, err := statusCRUD.Create(ctx, d); err != nil {
+		t.Fatalf("create status: %v", err)
+	}
+
+	c := &ReadDesireInformerManagingController{
+		statusCRUD: statusCRUD,
+		running:    map[keys.ReadDesireKey]*runningInstance{},
+	}
+	tombstone := cache.DeletedFinalStateUnknown{Key: d.GetDocumentID(), Obj: d}
+	c.handleDelete(tombstone)
+
+	if _, err := statusCRUD.Get(ctx, d.GetDocumentID()); !database.IsNotFoundError(err) {
+		t.Errorf("expected status record deleted via tombstone, got err: %v", err)
+	}
+}
+
+func TestHandleDelete_InvalidType_NoOp(t *testing.T) {
+	statusCRUD := listertesting.NewFakeCRUD[kubeapplier.ReadDesire, *kubeapplier.ReadDesire]()
+	c := &ReadDesireInformerManagingController{
+		statusCRUD: statusCRUD,
+		running:    map[keys.ReadDesireKey]*runningInstance{},
+	}
+	// Should not panic.
+	c.handleDelete("not a read desire")
 }
