@@ -83,22 +83,13 @@ func (c Config) withDefaults() Config {
 // ApplyDesireController reconciles ApplyDesires by SSA-applying
 // spec.serverSideApply.kubeContent (Type=ServerSideApply) or deleting
 // spec.targetItem (Type=Delete).
-//
-// Reconcile cadence:
-//
-//   - Add events queue immediately.
-//   - Update events whose DynamoDB UpdateTime differs from the previous version
-//     queue immediately. UpdateTime-unchanged updates (informer resyncs, or our
-//     own status writes feeding back) are routed through the cooldown gate.
-//   - The cooldown gate lets each key through at most once per CooldownPeriod
-//     (10 min for SSA, 1 min for Delete).
-//   - On error the workqueue's rate limiter requeues the key with backoff.
 type ApplyDesireController struct {
 	name                string
 	applyDesireInformer cache.SharedIndexInformer
 	specFetcher         desirestatuswriter.Fetcher[kubeapplier.ApplyDesire, keys.ApplyDesireKey]
 	dyn                 dynamic.Interface
 	writer              desirestatuswriter.StatusWriter[kubeapplier.ApplyDesire, keys.ApplyDesireKey]
+	statusCRUD          database.ResourceCRUD[kubeapplier.ApplyDesire]
 	queue               workqueue.TypedRateLimitingInterface[keys.ApplyDesireKey]
 
 	cfg            Config
@@ -127,6 +118,7 @@ func NewApplyDesireController(
 		applyDesireInformer: applyDesireInformer,
 		specFetcher:         specFetcher,
 		dyn:                 dyn,
+		statusCRUD:          statusCRUD,
 		writer: desirestatuswriter.New[kubeapplier.ApplyDesire, keys.ApplyDesireKey, *kubeapplier.ApplyDesire](
 			statusFetcher,
 			&applyDesireReplacer{crud: statusCRUD},
@@ -144,6 +136,7 @@ func NewApplyDesireController(
 	if _, err := applyDesireInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    func(obj any) { c.handleAdd(obj) },
 		UpdateFunc: func(oldObj, newObj any) { c.handleUpdate(oldObj, newObj) },
+		DeleteFunc: func(obj any) { c.handleDelete(obj) },
 	}); err != nil {
 		return nil, fmt.Errorf("register informer handler: %w", err)
 	}
@@ -182,6 +175,24 @@ func (c *ApplyDesireController) handleUpdate(oldObj, newObj any) {
 	}
 	changed := !oldD.UpdateTime.Equal(newD.UpdateTime)
 	c.enqueueWithCooldown(newD, changed)
+}
+
+func (c *ApplyDesireController) handleDelete(obj any) {
+	d, ok := obj.(*kubeapplier.ApplyDesire)
+	if !ok {
+		// obj may be a DeletedFinalStateUnknown tombstone.
+		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+		if !ok {
+			return
+		}
+		d, ok = tombstone.Obj.(*kubeapplier.ApplyDesire)
+		if !ok {
+			return
+		}
+	}
+	if err := c.statusCRUD.Delete(context.Background(), d.GetDocumentID()); err != nil && !database.IsNotFoundError(err) {
+		klog.ErrorS(err, "stream watcher failed to delete status record for removed spec", "documentID", d.GetDocumentID())
+	}
 }
 
 func (c *ApplyDesireController) enqueue(d *kubeapplier.ApplyDesire) {

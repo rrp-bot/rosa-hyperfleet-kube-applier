@@ -912,3 +912,62 @@ func TestSyncOnce_DeleteDesire_TargetAbsent_Successful(t *testing.T) {
 var _ = database.IsNotFoundError
 var _ = unstructured.UnstructuredList{}
 var _ = types.UID("")
+
+// --- handleDelete Tests ---
+
+func TestHandleDelete_DeletesStatusRecord(t *testing.T) {
+	ctx := context.Background()
+
+	statusCRUD := listertesting.NewFakeCRUD[kubeapplier.ApplyDesire, *kubeapplier.ApplyDesire]()
+
+	// Pre-populate a status record for the desire.
+	d := newApplyDesire(t, "cm1", configMapTarget("cm1"), validConfigMapJSON("cm1"))
+	if _, err := statusCRUD.Create(ctx, d); err != nil {
+		t.Fatalf("create status: %v", err)
+	}
+
+	c := &ApplyDesireController{statusCRUD: statusCRUD}
+	c.handleDelete(d)
+
+	// Status record should now be gone.
+	if _, err := statusCRUD.Get(ctx, d.GetDocumentID()); !database.IsNotFoundError(err) {
+		t.Errorf("expected status record to be deleted, got err: %v", err)
+	}
+}
+
+func TestHandleDelete_StatusAlreadyGone_NoError(t *testing.T) {
+	// If the status record doesn't exist, handleDelete should not panic or log an error.
+	statusCRUD := listertesting.NewFakeCRUD[kubeapplier.ApplyDesire, *kubeapplier.ApplyDesire]()
+	c := &ApplyDesireController{statusCRUD: statusCRUD}
+
+	d := newApplyDesire(t, "cm1", configMapTarget("cm1"), validConfigMapJSON("cm1"))
+	// Should not panic.
+	c.handleDelete(d)
+}
+
+func TestHandleDelete_Tombstone_DeletesStatusRecord(t *testing.T) {
+	ctx := context.Background()
+
+	statusCRUD := listertesting.NewFakeCRUD[kubeapplier.ApplyDesire, *kubeapplier.ApplyDesire]()
+	d := newApplyDesire(t, "cm1", configMapTarget("cm1"), validConfigMapJSON("cm1"))
+	if _, err := statusCRUD.Create(ctx, d); err != nil {
+		t.Fatalf("create status: %v", err)
+	}
+
+	c := &ApplyDesireController{statusCRUD: statusCRUD}
+
+	// Simulate the informer wrapping the object in a DeletedFinalStateUnknown tombstone.
+	tombstone := cache.DeletedFinalStateUnknown{Key: d.GetDocumentID(), Obj: d}
+	c.handleDelete(tombstone)
+
+	if _, err := statusCRUD.Get(ctx, d.GetDocumentID()); !database.IsNotFoundError(err) {
+		t.Errorf("expected status record to be deleted via tombstone, got err: %v", err)
+	}
+}
+
+func TestHandleDelete_InvalidType_NoOp(t *testing.T) {
+	statusCRUD := listertesting.NewFakeCRUD[kubeapplier.ApplyDesire, *kubeapplier.ApplyDesire]()
+	c := &ApplyDesireController{statusCRUD: statusCRUD}
+	// Should not panic.
+	c.handleDelete("not a desire")
+}
