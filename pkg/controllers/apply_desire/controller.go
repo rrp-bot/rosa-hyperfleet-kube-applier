@@ -253,13 +253,18 @@ func (c *ApplyDesireController) SyncOnce(ctx context.Context, key keys.ApplyDesi
 		// Empty type is treated as ServerSideApply for backward compatibility
 		// with documents written before the Type field was introduced.
 		appliedGen, syncErr := c.applyDesired(ctx, desire)
-		return c.writer.UpdateStatus(ctx, key, func(d *kubeapplier.ApplyDesire) {
+		statusErr := c.writer.UpdateStatus(ctx, key, func(d *kubeapplier.ApplyDesire) {
 			d.SetDocumentID(desire.GetDocumentID())
 			d.Status.ObservedDesireUpdateTime = desire.GetUpdateTime()
 			d.Status.AppliedResourceGeneration = appliedGen
 			conditions.SetSuccessful(&d.Status.Conditions, syncErr)
 			conditions.SetDegraded(&d.Status.Conditions, classifyAsDegraded(syncErr))
 		})
+		// Return both errors joined: a non-nil syncErr causes processNext to
+		// call AddRateLimited (exponential backoff) rather than Forget, so
+		// transient failures (e.g. namespace not yet created) retry promptly
+		// instead of waiting for the 10-minute cooldown to expire.
+		return errors.Join(syncErr, statusErr)
 
 	case kubeapplier.ApplyDesireTypeDelete:
 		mutate := c.evaluateDelete(ctx, desire)
@@ -271,12 +276,13 @@ func (c *ApplyDesireController) SyncOnce(ctx context.Context, key keys.ApplyDesi
 
 	default:
 		syncErr := conditions.NewPreCheckError(fmt.Errorf("unknown desire type %q", desire.Spec.Type))
-		return c.writer.UpdateStatus(ctx, key, func(d *kubeapplier.ApplyDesire) {
+		statusErr := c.writer.UpdateStatus(ctx, key, func(d *kubeapplier.ApplyDesire) {
 			d.SetDocumentID(desire.GetDocumentID())
 			d.Status.ObservedDesireUpdateTime = desire.GetUpdateTime()
 			conditions.SetSuccessful(&d.Status.Conditions, syncErr)
 			conditions.SetDegraded(&d.Status.Conditions, nil)
 		})
+		return errors.Join(syncErr, statusErr)
 	}
 }
 

@@ -460,8 +460,10 @@ func TestSyncOnce_PreCheckError_SetsConditions(t *testing.T) {
 	}
 
 	key := mustKey(t, created)
-	if err := c.SyncOnce(ctx, key); err != nil {
-		t.Fatalf("SyncOnce: %v", err)
+	// SyncOnce now returns the syncErr so processNext can apply exponential
+	// backoff via AddRateLimited rather than silently cooling down.
+	if err := c.SyncOnce(ctx, key); err == nil {
+		t.Fatal("SyncOnce should return non-nil error for pre-check failure")
 	}
 
 	updated, err := statusCRUD.Get(ctx, created.DocumentID)
@@ -855,8 +857,10 @@ func TestEvaluateDelete_UnknownType_PreCheckFailed(t *testing.T) {
 	}
 
 	key := mustKey(t, created)
-	if err := c.SyncOnce(ctx, key); err != nil {
-		t.Fatalf("SyncOnce: %v", err)
+	// SyncOnce now returns the syncErr so processNext can apply exponential
+	// backoff via AddRateLimited rather than silently cooling down.
+	if err := c.SyncOnce(ctx, key); err == nil {
+		t.Fatal("SyncOnce should return non-nil error for unknown desire type")
 	}
 
 	updated, err := statusCRUD.Get(ctx, created.DocumentID)
