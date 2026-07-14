@@ -7,8 +7,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
-	kubeapplier "github.com/rrp-bot/kube-applier-aws/api/kubeapplier"
-	"github.com/rrp-bot/kube-applier-aws/internal/database"
+	kubeapplier "github.com/rrp-bot/rosa-hyperfleet-kube-applier/api/kubeapplier"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/internal/database"
 )
 
 func newTestApplyDesire(docID string) *kubeapplier.ApplyDesire {

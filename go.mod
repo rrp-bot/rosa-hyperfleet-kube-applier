@@ -1,4 +1,4 @@
-module github.com/rrp-bot/kube-applier-aws
+module github.com/rrp-bot/rosa-hyperfleet-kube-applier
 
 go 1.26.3
 

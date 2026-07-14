@@ -20,13 +20,13 @@ import (
 	"k8s.io/klog/v2"
 	utilsclock "k8s.io/utils/clock"
 
-	"github.com/rrp-bot/kube-applier-aws/api/kubeapplier"
-	controllerutil "github.com/rrp-bot/kube-applier-aws/internal/controllerutils"
-	"github.com/rrp-bot/kube-applier-aws/internal/database"
-	"github.com/rrp-bot/kube-applier-aws/pkg/controllers/conditions"
-	"github.com/rrp-bot/kube-applier-aws/pkg/controllers/desirestatuswriter"
-	"github.com/rrp-bot/kube-applier-aws/pkg/controllers/keys"
-	"github.com/rrp-bot/kube-applier-aws/pkg/controllers/read_desire_kubernetes"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/api/kubeapplier"
+	controllerutil "github.com/rrp-bot/rosa-hyperfleet-kube-applier/internal/controllerutils"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/internal/database"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/pkg/controllers/conditions"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/pkg/controllers/desirestatuswriter"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/pkg/controllers/keys"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/pkg/controllers/read_desire_kubernetes"
 )
 
 // DefaultCooldownPeriod is the minimum interval between two reconciles of a

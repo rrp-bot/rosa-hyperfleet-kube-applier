@@ -14,9 +14,9 @@ import (
 
 	"k8s.io/klog/v2"
 
-	"github.com/rrp-bot/kube-applier-aws/internal/database"
-	"github.com/rrp-bot/kube-applier-aws/internal/database/informers"
-	"github.com/rrp-bot/kube-applier-aws/pkg/app"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/internal/database"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/internal/database/informers"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/pkg/app"
 )
 
 // KubeApplierRootCmdFlags collects the user-facing flags for the kube-applier

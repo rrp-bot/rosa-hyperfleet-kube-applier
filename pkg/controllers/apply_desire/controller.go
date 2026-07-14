@@ -36,12 +36,12 @@ import (
 	"k8s.io/klog/v2"
 	utilsclock "k8s.io/utils/clock"
 
-	"github.com/rrp-bot/kube-applier-aws/api/kubeapplier"
-	"github.com/rrp-bot/kube-applier-aws/internal/controllerutils"
-	"github.com/rrp-bot/kube-applier-aws/internal/database"
-	"github.com/rrp-bot/kube-applier-aws/pkg/controllers/conditions"
-	"github.com/rrp-bot/kube-applier-aws/pkg/controllers/desirestatuswriter"
-	"github.com/rrp-bot/kube-applier-aws/pkg/controllers/keys"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/api/kubeapplier"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/internal/controllerutils"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/internal/database"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/pkg/controllers/conditions"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/pkg/controllers/desirestatuswriter"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/pkg/controllers/keys"
 )
 
 const FieldManager = "gcp-hcp-kube-applier"

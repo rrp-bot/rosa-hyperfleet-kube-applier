@@ -15,9 +15,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodbstreams"
 	"k8s.io/client-go/tools/cache"
 
-	kubeapplier "github.com/rrp-bot/kube-applier-aws/api/kubeapplier"
-	"github.com/rrp-bot/kube-applier-aws/internal/database"
-	"github.com/rrp-bot/kube-applier-aws/internal/database/listers"
+	kubeapplier "github.com/rrp-bot/rosa-hyperfleet-kube-applier/api/kubeapplier"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/internal/database"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/internal/database/listers"
 )
 
 // --- Unit tests (no LocalStack required) ---

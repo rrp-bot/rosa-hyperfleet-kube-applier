@@ -6,9 +6,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	kubeapplier "github.com/rrp-bot/kube-applier-aws/api/kubeapplier"
-	"github.com/rrp-bot/kube-applier-aws/internal/database"
-	"github.com/rrp-bot/kube-applier-aws/internal/desireid"
+	kubeapplier "github.com/rrp-bot/rosa-hyperfleet-kube-applier/api/kubeapplier"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/internal/database"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/internal/desireid"
 )
 
 func newDeleteCmd() *cobra.Command {
