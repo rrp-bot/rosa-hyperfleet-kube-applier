@@ -2,14 +2,13 @@ package cmd
 
 import (
 	"context"
+	"flag"
 	"fmt"
-	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
 
-	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
 
 	"k8s.io/klog/v2"
@@ -203,11 +202,12 @@ func RunRootCmd(cmd *cobra.Command, flags *KubeApplierRootCmdFlags) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	handlerOptions := &slog.HandlerOptions{Level: slog.Level(flags.LogVerbosity * -1), AddSource: true}
-	slogJSONHandler := slog.NewJSONHandler(os.Stdout, handlerOptions)
-	logger := logr.FromSlogHandler(slogJSONHandler)
-	ctx = klog.NewContext(ctx, logger)
-	klog.SetLogger(logger)
+	// Configure klog verbosity directly so V(n) calls work without any
+	// slog/logr bridge that can silently swallow verbose log levels.
+	klog.InitFlags(nil)
+	if err := flag.Set("v", fmt.Sprintf("%d", flags.LogVerbosity)); err != nil {
+		return fmt.Errorf("failed to set klog verbosity: %w", err)
+	}
 
 	options, err := flags.ToKubeApplierOptions(ctx)
 	if err != nil {
