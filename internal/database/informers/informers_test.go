@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,14 +14,92 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	dbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodbstreams"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
 
-	kubeapplier "github.com/rrp-bot/kube-applier-aws/internal/api/kubeapplier"
-	"github.com/rrp-bot/kube-applier-aws/internal/database"
-	"github.com/rrp-bot/kube-applier-aws/internal/database/listers"
+	kubeapplier "github.com/rrp-bot/rosa-hyperfleet-kube-applier/api/kubeapplier"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/internal/database"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/internal/database/listers"
 )
 
 // --- Unit tests (no LocalStack required) ---
+
+// TestGetRecordsLimit verifies the declared per-call record limit is the AWS
+// maximum so that it is always explicit rather than relying on API defaults.
+func TestGetRecordsLimit(t *testing.T) {
+	if getRecordsLimit != 1000 {
+		t.Errorf("getRecordsLimit = %d, want 1000", getRecordsLimit)
+	}
+}
+
+// TestPollShardWaitsForParent verifies the parent-before-child ordering
+// guarantee (Fix 1): a child shard goroutine must not start polling until the
+// parent's done channel is closed.
+func TestPollShardWaitsForParent(t *testing.T) {
+	parentDone := make(chan struct{})
+
+	var mu sync.RWMutex
+	workers := map[string]*shardWorkerState{
+		"parent-shard": {done: parentDone},
+	}
+
+	w := &dynamoDBStreamWatcher{
+		resultCh: make(chan watch.Event, 10),
+		done:     make(chan struct{}),
+	}
+	childWS := &shardWorkerState{done: make(chan struct{})}
+	workers["child-shard"] = childWS
+
+	// childPolling is closed by the child goroutine as soon as it exits the
+	// parent-wait select (i.e. once it would start polling).
+	childPolling := make(chan struct{})
+
+	// Run pollShard in the background. We use a context that we cancel as soon
+	// as the parent is done, so the child exits immediately after unblocking
+	// rather than panicking on a nil streamsClient.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rediscoverCh := make(chan string, 1)
+	go func() {
+		w.pollShard(
+			ctx,
+			nil, // streamsClient — child exits via ctx cancel before using it
+			"stream-arn",
+			"table",
+			shardState{shardID: "child-shard", parentShardID: "parent-shard"},
+			childWS,
+			&mu,
+			workers,
+			nil,
+			rediscoverCh,
+		)
+		close(childPolling)
+	}()
+
+	// Give the goroutine time to reach the parent-wait select.
+	time.Sleep(30 * time.Millisecond)
+
+	// Child should not have proceeded yet.
+	select {
+	case <-childPolling:
+		t.Fatal("child started polling before parent shard was done")
+	default:
+	}
+
+	// Close parent done and cancel ctx simultaneously so child unblocks then
+	// exits cleanly without calling the nil streamsClient.
+	cancel()
+	close(parentDone)
+
+	// Child must now exit promptly.
+	select {
+	case <-childPolling:
+		// good
+	case <-time.After(2 * time.Second):
+		t.Fatal("child shard goroutine did not exit after parent done and ctx cancel")
+	}
+}
 
 func TestListWatchWithoutWatchListSemantics(t *testing.T) {
 	lw := listWatchWithoutWatchListSemantics{&cache.ListWatch{}}
@@ -83,35 +162,6 @@ func TestListerGetNotFound(t *testing.T) {
 	_, err := lister.Get("nonexistent")
 	if !database.IsNotFoundError(err) {
 		t.Errorf("expected NotFoundError, got %v", err)
-	}
-}
-
-func TestDeleteDesireListerFromPopulatedCache(t *testing.T) {
-	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
-	d := &kubeapplier.DeleteDesire{
-		DynamoDBMetadata: kubeapplier.DynamoDBMetadata{DocumentID: "c1--del1"},
-		Spec:             kubeapplier.DeleteDesireSpec{ClusterID: "c1"},
-	}
-	if err := indexer.Add(d); err != nil {
-		t.Fatalf("indexer.Add: %v", err)
-	}
-
-	lister := listers.NewDeleteDesireLister(indexer)
-
-	got, err := lister.Get("c1--del1")
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	if got.Spec.ClusterID != "c1" {
-		t.Errorf("ClusterID = %q, want %q", got.Spec.ClusterID, "c1")
-	}
-
-	items, err := lister.List()
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(items) != 1 {
-		t.Errorf("List returned %d items, want 1", len(items))
 	}
 }
 
@@ -200,9 +250,8 @@ func startAndSync(t *testing.T, ctx context.Context, info KubeApplierInformers) 
 	t.Helper()
 	go info.RunWithContext(ctx)
 	applyInf, _ := info.ApplyDesires()
-	deleteInf, _ := info.DeleteDesires()
 	readInf, _ := info.ReadDesires()
-	if !cache.WaitForCacheSync(ctx.Done(), applyInf.HasSynced, deleteInf.HasSynced, readInf.HasSynced) {
+	if !cache.WaitForCacheSync(ctx.Done(), applyInf.HasSynced, readInf.HasSynced) {
 		t.Fatal("informers did not sync")
 	}
 }
@@ -231,10 +280,8 @@ func TestIntegration_InformerSyncsExistingDocuments(t *testing.T) {
 	prefix := fmt.Sprintf("inf-existing-%d", time.Now().UnixNano())
 
 	applyTable := prefix + database.TableSuffixApplyDesires
-	deleteTable := prefix + database.TableSuffixDeleteDesires
 	readTable := prefix + database.TableSuffixReadDesires
 	createTestTable(t, dbClient, applyTable)
-	createTestTable(t, dbClient, deleteTable)
 	createTestTable(t, dbClient, readTable)
 
 	dbCRUD := database.NewDynamoDBKubeApplierDBClient(dbClient, dbClient, prefix, prefix)
@@ -291,10 +338,8 @@ func TestIntegration_StreamDeliversEvents(t *testing.T) {
 	prefix := fmt.Sprintf("inf-stream-%d", time.Now().UnixNano())
 
 	applyTable := prefix + database.TableSuffixApplyDesires
-	deleteTable := prefix + database.TableSuffixDeleteDesires
 	readTable := prefix + database.TableSuffixReadDesires
 	createTestTable(t, dbClient, applyTable)
-	createTestTable(t, dbClient, deleteTable)
 	createTestTable(t, dbClient, readTable)
 
 	dbCRUD := database.NewDynamoDBKubeApplierDBClient(dbClient, dbClient, prefix, prefix)
@@ -364,7 +409,6 @@ func TestIntegration_PerTableIsolation(t *testing.T) {
 
 	for _, prefix := range []string{prefixA, prefixB} {
 		createTestTable(t, dbClient, prefix+database.TableSuffixApplyDesires)
-		createTestTable(t, dbClient, prefix+database.TableSuffixDeleteDesires)
 		createTestTable(t, dbClient, prefix+database.TableSuffixReadDesires)
 	}
 

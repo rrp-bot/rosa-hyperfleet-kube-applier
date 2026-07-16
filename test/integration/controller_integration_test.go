@@ -43,10 +43,10 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 
-	kubeapplier "github.com/rrp-bot/kube-applier-aws/internal/api/kubeapplier"
-	"github.com/rrp-bot/kube-applier-aws/internal/database"
-	"github.com/rrp-bot/kube-applier-aws/internal/database/informers"
-	"github.com/rrp-bot/kube-applier-aws/pkg/app"
+	kubeapplier "github.com/rrp-bot/rosa-hyperfleet-kube-applier/api/kubeapplier"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/internal/database"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/internal/database/informers"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/pkg/app"
 )
 
 // ----------------------------------------------------------------------------
@@ -111,7 +111,6 @@ func newFixture(t *testing.T, localstackEndpoint, kubeconfigPath string) *fixtur
 	for _, p := range []string{specsPrefix, statusPrefix} {
 		for _, suffix := range []string{
 			database.TableSuffixApplyDesires,
-			database.TableSuffixDeleteDesires,
 			database.TableSuffixReadDesires,
 		} {
 			createTable(t, dynDB, p+suffix)
@@ -305,8 +304,8 @@ func writeApplyDesireSpec(t *testing.T, dbClient *dynamodb.Client, specsPrefix s
 	tableName := specsPrefix + database.TableSuffixApplyDesires
 
 	var kubeContentStr string
-	if d.Spec.KubeContent != nil {
-		kubeContentStr = string(d.Spec.KubeContent.Raw)
+	if d.Spec.ServerSideApply != nil && d.Spec.ServerSideApply.KubeContent != nil {
+		kubeContentStr = string(d.Spec.ServerSideApply.KubeContent.Raw)
 	}
 
 	item := map[string]dbtypes.AttributeValue{
@@ -317,6 +316,7 @@ func writeApplyDesireSpec(t *testing.T, dbClient *dynamodb.Client, specsPrefix s
 		"spec": &dbtypes.AttributeValueMemberM{Value: map[string]dbtypes.AttributeValue{
 			"managementCluster": &dbtypes.AttributeValueMemberS{Value: d.Spec.ManagementCluster},
 			"clusterID":         &dbtypes.AttributeValueMemberS{Value: d.Spec.ClusterID},
+			"type":              &dbtypes.AttributeValueMemberS{Value: string(d.Spec.Type)},
 			"targetItem": &dbtypes.AttributeValueMemberM{Value: map[string]dbtypes.AttributeValue{
 				"group":     &dbtypes.AttributeValueMemberS{Value: d.Spec.TargetItem.Group},
 				"version":   &dbtypes.AttributeValueMemberS{Value: d.Spec.TargetItem.Version},
@@ -338,32 +338,65 @@ func writeApplyDesireSpec(t *testing.T, dbClient *dynamodb.Client, specsPrefix s
 	}
 }
 
-func writeDeleteDesireSpec(t *testing.T, dbClient *dynamodb.Client, specsPrefix string, d *kubeapplier.DeleteDesire) {
-	t.Helper()
-	tableName := specsPrefix + database.TableSuffixDeleteDesires
-	item := map[string]dbtypes.AttributeValue{
-		"documentID": &dbtypes.AttributeValueMemberS{Value: d.DocumentID},
-		"version":    &dbtypes.AttributeValueMemberN{Value: "1"},
-		"updateTime": &dbtypes.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339Nano)},
-		"createTime": &dbtypes.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339Nano)},
-		"spec": &dbtypes.AttributeValueMemberM{Value: map[string]dbtypes.AttributeValue{
-			"managementCluster": &dbtypes.AttributeValueMemberS{Value: d.Spec.ManagementCluster},
-			"clusterID":         &dbtypes.AttributeValueMemberS{Value: d.Spec.ClusterID},
-			"targetItem": &dbtypes.AttributeValueMemberM{Value: map[string]dbtypes.AttributeValue{
-				"group":     &dbtypes.AttributeValueMemberS{Value: d.Spec.TargetItem.Group},
-				"version":   &dbtypes.AttributeValueMemberS{Value: d.Spec.TargetItem.Version},
-				"resource":  &dbtypes.AttributeValueMemberS{Value: d.Spec.TargetItem.Resource},
-				"namespace": &dbtypes.AttributeValueMemberS{Value: d.Spec.TargetItem.Namespace},
-				"name":      &dbtypes.AttributeValueMemberS{Value: d.Spec.TargetItem.Name},
-			}},
-		}},
-	}
-	if _, err := dbClient.PutItem(context.Background(), &dynamodb.PutItemInput{
-		TableName: aws.String(tableName),
-		Item:      item,
-	}); err != nil {
-		t.Fatalf("writeDeleteDesireSpec PutItem %s/%s: %v", tableName, d.DocumentID, err)
-	}
+// TestIntegration_DeleteDesire pre-creates a ConfigMap on Kind, writes an
+// ApplyDesire (Type=Delete) spec to DynamoDB, starts the app, and asserts:
+//  1. The ConfigMap is deleted from the Kind cluster.
+//  2. The status document records Successful=True.
+func TestIntegration_DeleteDesire(t *testing.T) {
+	localstackEndpoint, kubeconfigPath := requireIntegration(t)
+	f := newFixture(t, localstackEndpoint, kubeconfigPath)
+
+	const (
+		documentID = "inttest--delete-cm"
+		cmName     = "inttest-delete-cm"
+		namespace  = "default"
+	)
+
+	// Pre-create the ConfigMap.
+	createConfigMapDirect(t, f.dynKube, namespace, cmName)
+
+	writeApplyDesireSpec(t, f.dynDB, f.specsPrefix, &kubeapplier.ApplyDesire{
+		DynamoDBMetadata: kubeapplier.DynamoDBMetadata{DocumentID: documentID},
+		Spec: kubeapplier.ApplyDesireSpec{
+			ManagementCluster: "inttest",
+			ClusterID:         "inttest",
+			Type:              kubeapplier.ApplyDesireTypeDelete,
+			TargetItem: kubeapplier.ResourceReference{
+				Version:   "v1",
+				Resource:  "configmaps",
+				Namespace: namespace,
+				Name:      cmName,
+			},
+		},
+	})
+
+	cancel, errCh := startApp(t, f)
+	t.Cleanup(func() {
+		cancel()
+		<-errCh
+	})
+
+	// 1. ConfigMap must be gone.
+	pollUntil(t, 60*time.Second, func() bool {
+		obj, _ := getConfigMap(f.dynKube, namespace, cmName)
+		return obj == nil
+	})
+	t.Logf("ConfigMap %s/%s deleted by ApplyDesire (Type=Delete) controller", namespace, cmName)
+
+	// 2. Status must show Successful=True.
+	pollUntil(t, 30*time.Second, func() bool {
+		status, err := f.dbClient.ApplyDesireStatus().Get(context.Background(), documentID)
+		if err != nil {
+			return false
+		}
+		for _, c := range status.Status.Conditions {
+			if c.Type == kubeapplier.ConditionTypeSuccessful && c.Status == metav1.ConditionTrue {
+				return true
+			}
+		}
+		return false
+	})
+	t.Logf("ApplyDesire (Type=Delete) status Successful=True in DynamoDB")
 }
 
 func writeReadDesireSpec(t *testing.T, dbClient *dynamodb.Client, specsPrefix string, d *kubeapplier.ReadDesire) {
@@ -441,7 +474,7 @@ func TestIntegration_ApplyDesire(t *testing.T) {
 				Namespace: namespace,
 				Name:      cmName,
 			},
-			KubeContent: &runtime.RawExtension{Raw: cmJSON},
+			ServerSideApply: &kubeapplier.ServerSideApplyConfig{KubeContent: &runtime.RawExtension{Raw: cmJSON}},
 		},
 	})
 
@@ -476,66 +509,6 @@ func TestIntegration_ApplyDesire(t *testing.T) {
 		return false
 	})
 	t.Logf("ApplyDesire status Successful=True in DynamoDB")
-}
-
-// TestIntegration_DeleteDesire pre-creates a ConfigMap on Kind, writes a
-// DeleteDesire spec to DynamoDB, starts the app, and asserts that:
-//  1. The ConfigMap is deleted from the Kind cluster.
-//  2. The status document records Successful=True.
-func TestIntegration_DeleteDesire(t *testing.T) {
-	localstackEndpoint, kubeconfigPath := requireIntegration(t)
-	f := newFixture(t, localstackEndpoint, kubeconfigPath)
-
-	const (
-		documentID = "inttest--delete-cm"
-		cmName     = "inttest-delete-cm"
-		namespace  = "default"
-	)
-
-	// Pre-create the ConfigMap.
-	createConfigMapDirect(t, f.dynKube, namespace, cmName)
-
-	writeDeleteDesireSpec(t, f.dynDB, f.specsPrefix, &kubeapplier.DeleteDesire{
-		DynamoDBMetadata: kubeapplier.DynamoDBMetadata{DocumentID: documentID},
-		Spec: kubeapplier.DeleteDesireSpec{
-			ManagementCluster: "inttest",
-			ClusterID:         "inttest",
-			TargetItem: kubeapplier.ResourceReference{
-				Version:   "v1",
-				Resource:  "configmaps",
-				Namespace: namespace,
-				Name:      cmName,
-			},
-		},
-	})
-
-	cancel, errCh := startApp(t, f)
-	t.Cleanup(func() {
-		cancel()
-		<-errCh
-	})
-
-	// 1. ConfigMap must be gone.
-	pollUntil(t, 60*time.Second, func() bool {
-		obj, _ := getConfigMap(f.dynKube, namespace, cmName)
-		return obj == nil
-	})
-	t.Logf("ConfigMap %s/%s deleted by DeleteDesire controller", namespace, cmName)
-
-	// 2. Status must show Successful=True.
-	pollUntil(t, 30*time.Second, func() bool {
-		status, err := f.dbClient.DeleteDesireStatus().Get(context.Background(), documentID)
-		if err != nil {
-			return false
-		}
-		for _, c := range status.Status.Conditions {
-			if c.Type == kubeapplier.ConditionTypeSuccessful && c.Status == metav1.ConditionTrue {
-				return true
-			}
-		}
-		return false
-	})
-	t.Logf("DeleteDesire status Successful=True in DynamoDB")
 }
 
 // TestIntegration_ReadDesire pre-creates a ConfigMap on Kind, writes a
@@ -617,7 +590,7 @@ func TestIntegration_OptimisticConcurrency(t *testing.T) {
 				Namespace: namespace,
 				Name:      cmName,
 			},
-			KubeContent: &runtime.RawExtension{Raw: cmJSON},
+			ServerSideApply: &kubeapplier.ServerSideApplyConfig{KubeContent: &runtime.RawExtension{Raw: cmJSON}},
 		},
 	})
 

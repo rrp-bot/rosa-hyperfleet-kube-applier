@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rrp-bot/kube-applier-aws/internal/database"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/internal/database"
 )
 
 // Desire is the type constraint for the generic FakeCRUD. It requires

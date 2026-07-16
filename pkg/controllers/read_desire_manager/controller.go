@@ -20,13 +20,13 @@ import (
 	"k8s.io/klog/v2"
 	utilsclock "k8s.io/utils/clock"
 
-	"github.com/rrp-bot/kube-applier-aws/internal/api/kubeapplier"
-	controllerutil "github.com/rrp-bot/kube-applier-aws/internal/controllerutils"
-	"github.com/rrp-bot/kube-applier-aws/internal/database"
-	"github.com/rrp-bot/kube-applier-aws/pkg/controllers/conditions"
-	"github.com/rrp-bot/kube-applier-aws/pkg/controllers/desirestatuswriter"
-	"github.com/rrp-bot/kube-applier-aws/pkg/controllers/keys"
-	"github.com/rrp-bot/kube-applier-aws/pkg/controllers/read_desire_kubernetes"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/api/kubeapplier"
+	controllerutil "github.com/rrp-bot/rosa-hyperfleet-kube-applier/internal/controllerutils"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/internal/database"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/pkg/controllers/conditions"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/pkg/controllers/desirestatuswriter"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/pkg/controllers/keys"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/pkg/controllers/read_desire_kubernetes"
 )
 
 // DefaultCooldownPeriod is the minimum interval between two reconciles of a
@@ -66,6 +66,7 @@ type ReadDesireInformerManagingController struct {
 	specFetcher        *readDesireSpecFetcher
 	factory            PerInstanceFactory
 	writer             desirestatuswriter.StatusWriter[kubeapplier.ReadDesire, keys.ReadDesireKey]
+	statusCRUD         database.ResourceCRUD[kubeapplier.ReadDesire]
 	queue              workqueue.TypedRateLimitingInterface[keys.ReadDesireKey]
 
 	cfg      Config
@@ -99,6 +100,7 @@ func NewReadDesireInformerManagingController(
 		readDesireInformer: readDesireInformer,
 		specFetcher:        specFetcher,
 		factory:            &realPerInstanceFactory{dyn: dyn, statusCRUD: statusCRUD},
+		statusCRUD:         statusCRUD,
 		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
 			workqueue.DefaultTypedControllerRateLimiter[keys.ReadDesireKey](),
 			workqueue.TypedRateLimitingQueueConfig[keys.ReadDesireKey]{Name: "ReadDesireInformerManagingController"},
@@ -197,7 +199,10 @@ func (c *ReadDesireInformerManagingController) handleDelete(obj any) {
 	if d == nil {
 		return
 	}
-	c.enqueue(d)
+	if err := c.statusCRUD.Delete(context.Background(), d.GetDocumentID()); err != nil && !database.IsNotFoundError(err) {
+		klog.ErrorS(err, "failed to delete status record for removed read desire spec", "documentID", d.GetDocumentID())
+	}
+	c.stopByKey(keys.ReadDesireKey{ClusterID: d.Spec.ClusterID, Name: d.GetDocumentID()})
 }
 
 func (c *ReadDesireInformerManagingController) enqueue(d *kubeapplier.ReadDesire) {

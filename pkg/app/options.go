@@ -9,15 +9,14 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 
-	"github.com/rrp-bot/kube-applier-aws/internal/database"
-	"github.com/rrp-bot/kube-applier-aws/internal/database/informers"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/internal/database"
+	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/internal/database/informers"
 )
 
 const AppShortDescriptionName = "AWS HCP kube-applier"
 
 const (
 	threadsApply       = 4
-	threadsDelete      = 4
 	threadsReadManager = 1
 )
 

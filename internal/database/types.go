@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	kubeapplier "github.com/rrp-bot/kube-applier-aws/internal/api/kubeapplier"
+	kubeapplier "github.com/rrp-bot/rosa-hyperfleet-kube-applier/api/kubeapplier"
 )
 
 // DynamoDBMetadataAccessor provides generic access to the DynamoDB-specific
@@ -47,13 +47,13 @@ type ResourceCRUD[T any] interface {
 // KubeApplierDBClient is the per-management-cluster handle that wraps two
 // sets of DynamoDB tables: specs (read-only for the agent) and status
 // (read-write for the agent). IAM policies enforce directional isolation.
+//
+// Delete desires now use the applydesires tables (Type=Delete on ApplyDesire).
 type KubeApplierDBClient interface {
 	ApplyDesireSpecs() SpecReader[kubeapplier.ApplyDesire]
-	DeleteDesireSpecs() SpecReader[kubeapplier.DeleteDesire]
 	ReadDesireSpecs() SpecReader[kubeapplier.ReadDesire]
 
 	ApplyDesireStatus() ResourceCRUD[kubeapplier.ApplyDesire]
-	DeleteDesireStatus() ResourceCRUD[kubeapplier.DeleteDesire]
 	ReadDesireStatus() ResourceCRUD[kubeapplier.ReadDesire]
 
 	Close() error

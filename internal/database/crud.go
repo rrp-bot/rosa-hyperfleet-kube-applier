@@ -12,7 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
-	kubeapplier "github.com/rrp-bot/kube-applier-aws/internal/api/kubeapplier"
+	kubeapplier "github.com/rrp-bot/rosa-hyperfleet-kube-applier/api/kubeapplier"
 )
 
 // desire is the type constraint for the generic CRUD implementations. It
@@ -268,11 +268,6 @@ func (c *dynamoDBDesireCRUD[T, PT]) Delete(ctx context.Context, documentID strin
 // stream image) to an *ApplyDesire.
 func ItemToApplyDesire(item map[string]types.AttributeValue) (*kubeapplier.ApplyDesire, error) {
 	return itemToDesire[kubeapplier.ApplyDesire, *kubeapplier.ApplyDesire](item)
-}
-
-// ItemToDeleteDesire converts a raw DynamoDB attribute map to a *DeleteDesire.
-func ItemToDeleteDesire(item map[string]types.AttributeValue) (*kubeapplier.DeleteDesire, error) {
-	return itemToDesire[kubeapplier.DeleteDesire, *kubeapplier.DeleteDesire](item)
 }
 
 // ItemToReadDesire converts a raw DynamoDB attribute map to a *ReadDesire.
