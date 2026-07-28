@@ -337,6 +337,30 @@ func waitForCacheValue(t *testing.T, store cache.Store, documentID, wantClusterI
 	}
 }
 
+// waitForCacheVersion polls until the ApplyDesire with the given documentID has
+// Version == wantVersion, or until timeout expires.
+func waitForCacheVersion(t *testing.T, store cache.Store, documentID string, wantVersion int64, timeout time.Duration) {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		item, exists, err := store.GetByKey(documentID)
+		if err == nil && exists {
+			if d, ok := item.(*kubeapplier.ApplyDesire); ok && d.Version == wantVersion {
+				return
+			}
+		}
+		select {
+		case <-deadline:
+			var gotVersion int64
+			if item, exists, _ := store.GetByKey(documentID); exists {
+				gotVersion = item.(*kubeapplier.ApplyDesire).Version
+			}
+			t.Fatalf("timed out: %s Version = %d, want %d", documentID, gotVersion, wantVersion)
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
 // newTestInformers creates informers with both poll and relist active at test
 // speeds. Suitable for tests that don't need to isolate which mechanism fires.
 func newTestInformers(dbClient *dynamodb.Client, prefix string) KubeApplierInformers {
@@ -443,6 +467,12 @@ func TestIntegration_InformerSyncsExistingDocuments(t *testing.T) {
 // and no re-list fires during the test. Changes can only arrive via the 500ms
 // poll. The outer timeout is generous (30s) to absorb LocalStack latency, but
 // in practice the poll fires within ~500ms so the test completes in ~1s.
+//
+// The test performs three consecutive Replace calls, each producing a new
+// database version number. After each write it records the wall-clock time,
+// then waits for the cache to reflect the new version. The elapsed time
+// between write and cache update is logged, proving the doorbell (not a
+// re-list) delivered the change with low latency.
 func TestIntegration_DoorbellDeliversEvent(t *testing.T) {
 	requireLocalStack(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -469,7 +499,7 @@ func TestIntegration_DoorbellDeliversEvent(t *testing.T) {
 		DynamoDBMetadata: kubeapplier.DynamoDBMetadata{DocumentID: "c1--doorbell"},
 		Spec: kubeapplier.ApplyDesireSpec{
 			ManagementCluster: "mc-test",
-			ClusterID:         "original",
+			ClusterID:         "v1",
 			TargetItem: kubeapplier.ResourceReference{
 				Version:  "v1",
 				Resource: "configmaps",
@@ -477,25 +507,31 @@ func TestIntegration_DoorbellDeliversEvent(t *testing.T) {
 			},
 		},
 	}
-	created, err := crud.Create(ctx, d)
+	writeAt := time.Now()
+	current, err := crud.Create(ctx, d)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
+	// version=1 after Create.
+	waitForCacheVersion(t, applyInf.GetStore(), "c1--doorbell", current.Version, 5*time.Second)
+	t.Logf("doorbell: version=%d in cache after %s", current.Version, time.Since(writeAt).Round(time.Millisecond))
 
-	// The poll (500ms interval) should deliver the new document well within 5s.
-	// The 30s outer timeout means this never flaps in CI.
-	waitForCacheCount(t, applyInf.GetStore(), 1, 5*time.Second)
-	t.Log("doorbell delivered new document to cache")
-
-	// --- Modify the document. ---
-	created.Spec.ClusterID = "updated"
-	if _, err := crud.Replace(ctx, created); err != nil {
-		t.Fatalf("Replace: %v", err)
+	// --- Three successive Replace calls, each bumping the version number. ---
+	for i := 0; i < 3; i++ {
+		current.Spec.ClusterID = fmt.Sprintf("v%d", current.Version+1)
+		writeAt = time.Now()
+		current, err = crud.Replace(ctx, current)
+		if err != nil {
+			t.Fatalf("Replace %d: %v", i+1, err)
+		}
+		wantVersion := current.Version
+		waitForCacheVersion(t, applyInf.GetStore(), "c1--doorbell", wantVersion, 5*time.Second)
+		elapsed := time.Since(writeAt).Round(time.Millisecond)
+		t.Logf("doorbell: version=%d in cache after %s (must be < 3s)", wantVersion, elapsed)
+		if elapsed > 3*time.Second {
+			t.Errorf("revision %d took %s to appear in cache — expected < 3s", wantVersion, elapsed)
+		}
 	}
-
-	// The modification must also arrive via the poll within 5s.
-	waitForCacheValue(t, applyInf.GetStore(), "c1--doorbell", "updated", 5*time.Second)
-	t.Log("doorbell delivered updated document to cache")
 }
 
 // TestIntegration_RelistCatchesMissedEvents proves that the safety-net re-list

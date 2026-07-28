@@ -167,19 +167,28 @@ func createTable(t *testing.T, dbClient *dynamodb.Client, tableName string) {
 // startApp wires and runs app.Options.Run in a background goroutine. It
 // returns a cancel func to stop the app and a channel that receives the Run
 // error when the app exits.
-func startApp(t *testing.T, f *fixture) (context.CancelFunc, <-chan error) {
+//
+// pollInterval controls how often the informer polls DynamoDB for changes.
+// watchDuration controls how long before the watcher closes and triggers a
+// full re-list. Pass 0 for either to use the test defaults (500ms / 10s).
+func startApp(t *testing.T, f *fixture, pollInterval, watchDuration time.Duration) (context.CancelFunc, <-chan error) {
 	t.Helper()
+
+	if pollInterval == 0 {
+		pollInterval = 500 * time.Millisecond
+	}
+	if watchDuration == 0 {
+		watchDuration = 10 * time.Second
+	}
 
 	reg := prometheus.NewRegistry()
 
-	// Use short poll/watch durations for integration tests so events propagate
-	// quickly without waiting for the default 15s poll interval.
 	inf := informers.NewKubeApplierInformersWithOptions(
 		f.dynDB,
 		f.specsPrefix,
-		5*time.Second,        // resync period
-		500*time.Millisecond, // poll interval — fast for integration tests
-		10*time.Second,       // watch duration — triggers re-list every 10s
+		5*time.Second, // resync period
+		pollInterval,
+		watchDuration,
 	)
 
 	restCfg, err := clientcmd.BuildConfigFromFlags("", f.kubeconfigPath)
@@ -398,7 +407,7 @@ func TestIntegration_DeleteDesire(t *testing.T) {
 		},
 	})
 
-	cancel, errCh := startApp(t, f)
+	cancel, errCh := startApp(t, f, 0, 0)
 	t.Cleanup(func() {
 		cancel()
 		<-errCh
@@ -474,7 +483,7 @@ func TestIntegration_ApplyDesire(t *testing.T) {
 		},
 	})
 
-	cancel, errCh := startApp(t, f)
+	cancel, errCh := startApp(t, f, 0, 0)
 	t.Cleanup(func() {
 		cancel()
 		<-errCh
@@ -507,6 +516,133 @@ func TestIntegration_ApplyDesire(t *testing.T) {
 	t.Logf("ApplyDesire status Successful=True in DynamoDB")
 }
 
+// TestIntegration_DoorbellAppliesRevision is the end-to-end doorbell test.
+//
+// It proves that a revision written to the DynamoDB specs table propagates
+// all the way through the poll watcher → informer cache → controller →
+// kube-apiserver pipeline, and appears on the Kind cluster within a bounded
+// wall-clock window — without relying on the safety-net re-list.
+//
+// Sequence:
+//  1. Write revision 1 of an ApplyDesire spec (ConfigMap with data.revision=v1).
+//     Start the app with a 500ms poll interval and a 30-minute watch duration
+//     (re-list effectively disabled). Wait for the ConfigMap to appear on Kind.
+//  2. Write revision 2 of the same spec (data.revision=v2, updateTime bumped).
+//     Record the write time. Assert the ConfigMap on Kind reflects v2 within
+//     5 seconds. Log the actual elapsed time.
+//
+// The 5s assertion window is strict enough to prove the doorbell (not a re-list)
+// delivered the change: with a 500ms poll the update typically appears in ~1s.
+// The outer test timeout is 90s to give CI headroom without letting the test
+// hang indefinitely.
+func TestIntegration_DoorbellAppliesRevision(t *testing.T) {
+	localstackEndpoint, kubeconfigPath := requireIntegration(t)
+	f := newFixture(t, localstackEndpoint, kubeconfigPath)
+
+	const (
+		documentID = "inttest--doorbell-revision"
+		cmName     = "inttest-doorbell-revision"
+		namespace  = "default"
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	// Pre-clean any leftover ConfigMap from a previous run.
+	_ = f.dynKube.Resource(configMapGVR).Namespace(namespace).Delete(
+		ctx, cmName, metav1.DeleteOptions{})
+	t.Cleanup(func() {
+		_ = f.dynKube.Resource(configMapGVR).Namespace(namespace).Delete(
+			context.Background(), cmName, metav1.DeleteOptions{})
+	})
+
+	buildCMJSON := func(revision string) []byte {
+		b, err := json.Marshal(map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata":   map[string]interface{}{"name": cmName, "namespace": namespace},
+			"data":       map[string]interface{}{"revision": revision},
+		})
+		if err != nil {
+			t.Fatalf("json.Marshal: %v", err)
+		}
+		return b
+	}
+
+	// --- Revision 1: write spec and wait for Kind to reflect it. ---
+	writeApplyDesireSpec(t, f.dynDB, f.specsPrefix, &kubeapplier.ApplyDesire{
+		DynamoDBMetadata: kubeapplier.DynamoDBMetadata{DocumentID: documentID},
+		Spec: kubeapplier.ApplyDesireSpec{
+			ManagementCluster: "inttest",
+			ClusterID:         "inttest",
+			TargetItem: kubeapplier.ResourceReference{
+				Version:   "v1",
+				Resource:  "configmaps",
+				Namespace: namespace,
+				Name:      cmName,
+			},
+			ServerSideApply: &kubeapplier.ServerSideApplyConfig{
+				KubeContent: &runtime.RawExtension{Raw: buildCMJSON("v1")},
+			},
+		},
+	})
+
+	// Start the app with a fast poll (500ms) and a very long watch duration
+	// (30 minutes) so the re-list never fires during this test. Changes must
+	// reach Kind via the doorbell poll only.
+	appCancel, errCh := startApp(t, f, 500*time.Millisecond, 30*time.Minute)
+	t.Cleanup(func() {
+		appCancel()
+		<-errCh
+	})
+
+	pollUntil(t, 60*time.Second, func() bool {
+		obj, _ := getConfigMap(f.dynKube, namespace, cmName)
+		if obj == nil {
+			return false
+		}
+		data, _, _ := unstructured.NestedString(obj.Object, "data", "revision")
+		return data == "v1"
+	})
+	t.Logf("revision v1 applied to Kind cluster")
+
+	// --- Revision 2: overwrite the spec in DynamoDB with a bumped updateTime. ---
+	// The poll watcher scans for items with updateTime > (now - watchDuration).
+	// Writing a fresh updateTime guarantees this item falls within the window.
+	writeAt := time.Now()
+	writeApplyDesireSpec(t, f.dynDB, f.specsPrefix, &kubeapplier.ApplyDesire{
+		DynamoDBMetadata: kubeapplier.DynamoDBMetadata{DocumentID: documentID},
+		Spec: kubeapplier.ApplyDesireSpec{
+			ManagementCluster: "inttest",
+			ClusterID:         "inttest",
+			TargetItem: kubeapplier.ResourceReference{
+				Version:   "v1",
+				Resource:  "configmaps",
+				Namespace: namespace,
+				Name:      cmName,
+			},
+			ServerSideApply: &kubeapplier.ServerSideApplyConfig{
+				KubeContent: &runtime.RawExtension{Raw: buildCMJSON("v2")},
+			},
+		},
+	})
+
+	// The poll fires every 500ms, so the update should reach Kind in ~1s.
+	// Allow 5s as a strict bound — anything beyond that indicates the doorbell
+	// is not working and the test would otherwise rely on the re-list (which
+	// is disabled here).
+	pollUntil(t, 5*time.Second, func() bool {
+		obj, _ := getConfigMap(f.dynKube, namespace, cmName)
+		if obj == nil {
+			return false
+		}
+		data, _, _ := unstructured.NestedString(obj.Object, "data", "revision")
+		return data == "v2"
+	})
+	elapsed := time.Since(writeAt).Round(time.Millisecond)
+	t.Logf("revision v2 applied to Kind cluster after %s via doorbell poll (no re-list)", elapsed)
+}
+
 // TestIntegration_ReadDesire pre-creates a ConfigMap on Kind, writes a
 // ReadDesire spec to DynamoDB, starts the app, and asserts that the status
 // document's KubeContent field is populated with the live object JSON.
@@ -537,7 +673,7 @@ func TestIntegration_ReadDesire(t *testing.T) {
 		},
 	})
 
-	cancel, errCh := startApp(t, f)
+	cancel, errCh := startApp(t, f, 0, 0)
 	t.Cleanup(func() {
 		cancel()
 		<-errCh
@@ -590,7 +726,7 @@ func TestIntegration_OptimisticConcurrency(t *testing.T) {
 		},
 	})
 
-	cancel, errCh := startApp(t, f)
+	cancel, errCh := startApp(t, f, 0, 0)
 	defer func() {
 		cancel()
 		<-errCh
