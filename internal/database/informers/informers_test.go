@@ -313,15 +313,67 @@ func waitForCacheCount(t *testing.T, store cache.Store, want int, timeout time.D
 	}
 }
 
-// newTestInformers creates informers with short poll/watch durations suitable
-// for integration tests.
+// waitForCacheValue polls until the ApplyDesire with the given documentID has
+// ClusterID == wantClusterID, or until timeout expires.
+func waitForCacheValue(t *testing.T, store cache.Store, documentID, wantClusterID string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		item, exists, err := store.GetByKey(documentID)
+		if err == nil && exists {
+			if d, ok := item.(*kubeapplier.ApplyDesire); ok && d.Spec.ClusterID == wantClusterID {
+				return
+			}
+		}
+		select {
+		case <-deadline:
+			var got string
+			if item, exists, _ := store.GetByKey(documentID); exists {
+				got = item.(*kubeapplier.ApplyDesire).Spec.ClusterID
+			}
+			t.Fatalf("timed out: %s ClusterID = %q, want %q", documentID, got, wantClusterID)
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+// newTestInformers creates informers with both poll and relist active at test
+// speeds. Suitable for tests that don't need to isolate which mechanism fires.
 func newTestInformers(dbClient *dynamodb.Client, prefix string) KubeApplierInformers {
 	return NewKubeApplierInformersWithOptions(
 		dbClient,
 		prefix,
+		30*time.Second,       // resync period
+		500*time.Millisecond, // poll interval
+		10*time.Second,       // watch duration — re-list every 10s
+	)
+}
+
+// newDoorbellOnlyInformers creates informers with a fast poll interval but a
+// very long watch duration. The watcher will not close (and thus not trigger
+// a re-list) within any reasonable test window, so changes can only reach the
+// cache via the periodic poll. Use this to prove the doorbell path works.
+func newDoorbellOnlyInformers(dbClient *dynamodb.Client, prefix string) KubeApplierInformers {
+	return NewKubeApplierInformersWithOptions(
+		dbClient,
+		prefix,
+		30*time.Second,       // resync period
+		500*time.Millisecond, // fast poll — doorbell fires within ~500ms
+		30*time.Minute,       // very long watch duration — re-list never fires during test
+	)
+}
+
+// newRelistOnlyInformers creates informers with a very long poll interval but a
+// short watch duration. The poll ticker will not fire during the test window, so
+// changes can only reach the cache via the periodic re-list. Use this to prove
+// the safety-net relist path works independently of the doorbell.
+func newRelistOnlyInformers(dbClient *dynamodb.Client, prefix string) KubeApplierInformers {
+	return NewKubeApplierInformersWithOptions(
+		dbClient,
+		prefix,
 		30*time.Second,  // resync period
-		500*time.Millisecond, // fast poll for tests
-		10*time.Second,  // watch duration — triggers a re-list every 10s in tests
+		30*time.Minute,  // very long poll interval — doorbell never fires during test
+		2*time.Second,   // short watch duration — re-list fires after 2s
 	)
 }
 
@@ -383,37 +435,45 @@ func TestIntegration_InformerSyncsExistingDocuments(t *testing.T) {
 	}
 }
 
-func TestIntegration_PollDeliversEvents(t *testing.T) {
+// TestIntegration_DoorbellDeliversEvent proves that the periodic poll (the
+// "doorbell") carries newly written and updated documents into the cache,
+// independently of the safety-net re-list.
+//
+// It uses a very long watch duration (30 minutes) so the watcher never closes
+// and no re-list fires during the test. Changes can only arrive via the 500ms
+// poll. The outer timeout is generous (30s) to absorb LocalStack latency, but
+// in practice the poll fires within ~500ms so the test completes in ~1s.
+func TestIntegration_DoorbellDeliversEvent(t *testing.T) {
 	requireLocalStack(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	dbClient := newLocalStackClient(t)
-	prefix := fmt.Sprintf("inf-poll-%d", time.Now().UnixNano())
+	prefix := fmt.Sprintf("inf-doorbell-%d", time.Now().UnixNano())
 
-	applyTable := prefix + database.TableSuffixApplyDesires
-	readTable := prefix + database.TableSuffixReadDesires
-	createTestTable(t, dbClient, applyTable)
-	createTestTable(t, dbClient, readTable)
+	createTestTable(t, dbClient, prefix+database.TableSuffixApplyDesires)
+	createTestTable(t, dbClient, prefix+database.TableSuffixReadDesires)
 
-	dbCRUD := database.NewDynamoDBKubeApplierDBClient(dbClient, dbClient, prefix, prefix)
-	crud := dbCRUD.ApplyDesireStatus()
+	crud := database.NewDynamoDBKubeApplierDBClient(dbClient, dbClient, prefix, prefix).ApplyDesireStatus()
 
-	info := newTestInformers(dbClient, prefix)
+	// Re-list is effectively disabled (30-minute watch duration).
+	// Only the 500ms poll can deliver events during this test.
+	info := newDoorbellOnlyInformers(dbClient, prefix)
 	startAndSync(t, ctx, info)
 
 	applyInf, _ := info.ApplyDesires()
 
-	// Create a document — the poll watcher should deliver it within poll interval.
+	// --- Write a new document AFTER sync. ---
+	// The initial List was empty, so this must arrive via the poll.
 	d := &kubeapplier.ApplyDesire{
-		DynamoDBMetadata: kubeapplier.DynamoDBMetadata{DocumentID: "c1--live"},
+		DynamoDBMetadata: kubeapplier.DynamoDBMetadata{DocumentID: "c1--doorbell"},
 		Spec: kubeapplier.ApplyDesireSpec{
 			ManagementCluster: "mc-test",
-			ClusterID:         "c1",
+			ClusterID:         "original",
 			TargetItem: kubeapplier.ResourceReference{
 				Version:  "v1",
 				Resource: "configmaps",
-				Name:     "live-cm",
+				Name:     "doorbell-cm",
 			},
 		},
 	}
@@ -421,30 +481,80 @@ func TestIntegration_PollDeliversEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	// Item should appear in cache within a few poll intervals.
-	waitForCacheCount(t, applyInf.GetStore(), 1, 15*time.Second)
 
-	// Modify the document.
-	created.Spec.ClusterID = "c2"
+	// The poll (500ms interval) should deliver the new document well within 5s.
+	// The 30s outer timeout means this never flaps in CI.
+	waitForCacheCount(t, applyInf.GetStore(), 1, 5*time.Second)
+	t.Log("doorbell delivered new document to cache")
+
+	// --- Modify the document. ---
+	created.Spec.ClusterID = "updated"
 	if _, err := crud.Replace(ctx, created); err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
 
-	// Wait for the modification to propagate into the cache.
-	deadline := time.After(15 * time.Second)
-	for {
-		item, exists, _ := applyInf.GetStore().GetByKey("c1--live")
-		if exists {
-			if item.(*kubeapplier.ApplyDesire).Spec.ClusterID == "c2" {
-				break
-			}
-		}
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for modification in cache")
-		case <-time.After(100 * time.Millisecond):
-		}
+	// The modification must also arrive via the poll within 5s.
+	waitForCacheValue(t, applyInf.GetStore(), "c1--doorbell", "updated", 5*time.Second)
+	t.Log("doorbell delivered updated document to cache")
+}
+
+// TestIntegration_RelistCatchesMissedEvents proves that the safety-net re-list
+// catches any document that the poll missed, independently of the doorbell.
+//
+// It uses a very long poll interval (30 minutes) so the poll never fires during
+// the test. Documents can only arrive via the periodic re-list, which is
+// configured to fire every 2 seconds (short watch duration).
+func TestIntegration_RelistCatchesMissedEvents(t *testing.T) {
+	requireLocalStack(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	dbClient := newLocalStackClient(t)
+	prefix := fmt.Sprintf("inf-relist-%d", time.Now().UnixNano())
+
+	createTestTable(t, dbClient, prefix+database.TableSuffixApplyDesires)
+	createTestTable(t, dbClient, prefix+database.TableSuffixReadDesires)
+
+	crud := database.NewDynamoDBKubeApplierDBClient(dbClient, dbClient, prefix, prefix).ApplyDesireStatus()
+
+	// Poll is effectively disabled (30-minute poll interval).
+	// Only the re-list (triggered by the 2s watch duration expiry) can deliver events.
+	info := newRelistOnlyInformers(dbClient, prefix)
+	startAndSync(t, ctx, info)
+
+	applyInf, _ := info.ApplyDesires()
+
+	// Write a document — it will be invisible to the poll (which never fires)
+	// but must appear after the next re-list (within ~2s + scan latency).
+	d := &kubeapplier.ApplyDesire{
+		DynamoDBMetadata: kubeapplier.DynamoDBMetadata{DocumentID: "c1--relist"},
+		Spec: kubeapplier.ApplyDesireSpec{
+			ManagementCluster: "mc-test",
+			ClusterID:         "original",
+			TargetItem: kubeapplier.ResourceReference{
+				Version:  "v1",
+				Resource: "configmaps",
+				Name:     "relist-cm",
+			},
+		},
 	}
+	created, err := crud.Create(ctx, d)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// The re-list fires after ~2s. Allow 10s for it plus LocalStack scan latency.
+	waitForCacheCount(t, applyInf.GetStore(), 1, 10*time.Second)
+	t.Log("re-list delivered new document to cache")
+
+	// Modify and confirm the next re-list picks up the change too.
+	created.Spec.ClusterID = "updated"
+	if _, err := crud.Replace(ctx, created); err != nil {
+		t.Fatalf("Replace: %v", err)
+	}
+
+	waitForCacheValue(t, applyInf.GetStore(), "c1--relist", "updated", 10*time.Second)
+	t.Log("re-list delivered updated document to cache")
 }
 
 func TestIntegration_PerTableIsolation(t *testing.T) {
