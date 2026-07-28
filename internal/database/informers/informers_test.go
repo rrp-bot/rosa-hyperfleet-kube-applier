@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	dbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	dyndbu "github.com/openshift-online/rosa-hyperfleet-api/hyperfleet-db/dynamodb"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
@@ -58,7 +59,7 @@ func TestPollWatcher_DeliversModifiedEvents(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	w := newDynamoDBPollWatcher(
+	w := dyndbu.NewPollWatcher(
 		ctx,
 		"test-table",
 		reader,
@@ -101,7 +102,7 @@ func TestPollWatcher_ClosesAfterWatchDuration(t *testing.T) {
 	defer cancel()
 
 	watchDuration := 50 * time.Millisecond
-	w := newDynamoDBPollWatcher(
+	w := dyndbu.NewPollWatcher(
 		ctx,
 		"test-table",
 		reader,
@@ -128,7 +129,7 @@ func TestPollWatcher_StopClosesChannel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	w := newDynamoDBPollWatcher(
+	w := dyndbu.NewPollWatcher(
 		ctx,
 		"test-table",
 		reader,
@@ -150,7 +151,7 @@ func TestPollWatcher_StopClosesChannel(t *testing.T) {
 }
 
 func TestListWatchWithoutWatchListSemantics(t *testing.T) {
-	lw := listWatchWithoutWatchListSemantics{&cache.ListWatch{}}
+	lw := dyndbu.ListWatchWithoutWatchListSemantics{ListWatch: &cache.ListWatch{}}
 	if !lw.IsWatchListSemanticsUnSupported() {
 		t.Error("expected IsWatchListSemanticsUnSupported to return true")
 	}

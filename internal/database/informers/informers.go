@@ -14,6 +14,7 @@ import (
 	kubeapplier "github.com/rrp-bot/rosa-hyperfleet-kube-applier/api/kubeapplier"
 	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/internal/database"
 	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/internal/database/listers"
+	dyndbu "github.com/openshift-online/rosa-hyperfleet-api/hyperfleet-db/dynamodb"
 )
 
 const defaultResyncPeriod = 30 * time.Second
@@ -40,7 +41,7 @@ func NewKubeApplierInformers(
 	specsClient *dynamodb.Client,
 	specsPrefix string,
 ) KubeApplierInformers {
-	return NewKubeApplierInformersWithOptions(specsClient, specsPrefix, defaultResyncPeriod, defaultPollInterval, defaultWatchDuration)
+	return NewKubeApplierInformersWithOptions(specsClient, specsPrefix, defaultResyncPeriod, dyndbu.DefaultPollInterval, dyndbu.DefaultWatchDuration)
 }
 
 func NewKubeApplierInformersWithOptions(
@@ -110,8 +111,8 @@ func NewKubeApplierInformersWithOptions(
 
 func newDesireInformer[T any](
 	tableName string,
-	reader sinceReader[T],
-	convert convertFn[T],
+	reader dyndbu.SinceReader[T],
+	convert dyndbu.ConvertFn[T],
 	exampleObj runtime.Object,
 	listFn func(context.Context) (runtime.Object, error),
 	resyncPeriod time.Duration,
@@ -123,11 +124,11 @@ func newDesireInformer[T any](
 			return listFn(ctx)
 		},
 		WatchFuncWithContext: func(ctx context.Context, _ metav1.ListOptions) (watch.Interface, error) {
-			return newDynamoDBPollWatcher(ctx, tableName, reader, convert, pollInterval, watchDuration), nil
+			return dyndbu.NewPollWatcher(ctx, tableName, reader, convert, pollInterval, watchDuration), nil
 		},
 	}
 	return cache.NewSharedIndexInformerWithOptions(
-		&listWatchWithoutWatchListSemantics{lw},
+		dyndbu.ListWatchWithoutWatchListSemantics{ListWatch: lw},
 		exampleObj,
 		cache.SharedIndexInformerOptions{
 			ResyncPeriod: resyncPeriod,

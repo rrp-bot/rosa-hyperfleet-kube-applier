@@ -30,22 +30,13 @@ import (
 	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/pkg/controllers/conditions"
 	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/pkg/controllers/desirestatuswriter"
 	"github.com/rrp-bot/rosa-hyperfleet-kube-applier/pkg/controllers/keys"
+	dyndbu "github.com/openshift-online/rosa-hyperfleet-api/hyperfleet-db/dynamodb"
 )
 
 // ResyncDuration is how often a ReadDesireKubernetesController re-evaluates
 // even without a fresh kube event, so a missing target object can be reflected
 // into status.
 const ResyncDuration = 60 * time.Second
-
-// listWatchWithoutWatchListSemantics opts out of the WatchList streaming mode
-// enabled by default in client-go v0.35+. The dynamic client's Watch does not
-// emit bookmark events that WatchList requires, so the reflector would never
-// reach Synced without this wrapper.
-type listWatchWithoutWatchListSemantics struct {
-	*cache.ListWatch
-}
-
-func (listWatchWithoutWatchListSemantics) IsWatchListSemanticsUnSupported() bool { return true }
 
 // ReadDesireKubernetesController reflects a single named kube object into a
 // ReadDesire's status. One instance per ReadDesire is owned by the manager.
@@ -103,7 +94,7 @@ func NewReadDesireKubernetesController(
 	}
 
 	c.informer = cache.NewSharedIndexInformerWithOptions(
-		&listWatchWithoutWatchListSemantics{ListWatch: c.singleObjectListWatch()},
+		dyndbu.ListWatchWithoutWatchListSemantics{ListWatch: c.singleObjectListWatch()},
 		&unstructured.Unstructured{},
 		cache.SharedIndexInformerOptions{ResyncPeriod: ResyncDuration},
 	)

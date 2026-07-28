@@ -1,19 +1,19 @@
 package database
 
-import "errors"
+import dyndbu "github.com/openshift-online/rosa-hyperfleet-api/hyperfleet-db/dynamodb"
 
-// Sentinel errors for the DynamoDB backend. Callers use errors.Is() to
-// classify errors returned by SpecReader and ResourceCRUD methods.
+// Sentinel errors — thin wrappers delegating to the central hyperfleet-db/dynamodb lib.
+// Callers in this repo use these package-level names unchanged.
 var (
-	ErrNotFound           = errors.New("not found")
-	ErrPreconditionFailed = errors.New("precondition failed")
-	ErrAlreadyExists      = errors.New("already exists")
+	ErrNotFound           = dyndbu.ErrNotFound
+	ErrAlreadyExists      = dyndbu.ErrAlreadyExists
+	ErrPreconditionFailed = dyndbu.ErrPreconditionFailed
 )
 
-func IsNotFoundError(err error) bool           { return errors.Is(err, ErrNotFound) }
-func IsPreconditionFailedError(err error) bool { return errors.Is(err, ErrPreconditionFailed) }
-func IsAlreadyExistsError(err error) bool      { return errors.Is(err, ErrAlreadyExists) }
+func IsNotFoundError(err error) bool           { return dyndbu.IsNotFoundError(err) }
+func IsAlreadyExistsError(err error) bool      { return dyndbu.IsAlreadyExistsError(err) }
+func IsPreconditionFailedError(err error) bool { return dyndbu.IsPreconditionFailedError(err) }
 
-func NewNotFoundError() error           { return ErrNotFound }
-func NewPreconditionFailedError() error { return ErrPreconditionFailed }
-func NewAlreadyExistsError() error      { return ErrAlreadyExists }
+func NewNotFoundError() error           { return dyndbu.ErrNotFound }
+func NewAlreadyExistsError() error      { return dyndbu.ErrAlreadyExists }
+func NewPreconditionFailedError() error { return dyndbu.ErrPreconditionFailed }
