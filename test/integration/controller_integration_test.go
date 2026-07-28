@@ -1,6 +1,6 @@
 // Package integration contains end-to-end tests that wire the full
-// kube-applier-aws stack: LocalStack (DynamoDB + Streams) as the backend store
-// and a Kind cluster (real kube-apiserver) as the reconciliation target.
+// kube-applier-aws stack: LocalStack DynamoDB as the backend store and a Kind
+// cluster (real kube-apiserver) as the reconciliation target.
 //
 // # Prerequisites
 //
@@ -31,7 +31,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	dbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
-	"github.com/aws/aws-sdk-go-v2/service/dynamodbstreams"
 	"github.com/prometheus/client_golang/prometheus"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -78,7 +77,6 @@ func requireIntegration(t *testing.T) (localstackEndpoint, kubeconfigPath string
 // fixture holds all wired dependencies for a single test run.
 type fixture struct {
 	dynDB          *dynamodb.Client
-	streamsDB      *dynamodbstreams.Client
 	dbClient       database.KubeApplierDBClient
 	dynKube        dynamic.Interface
 	kubeconfigPath string
@@ -86,7 +84,7 @@ type fixture struct {
 	statusPrefix   string
 }
 
-// newFixture creates unique DynamoDB tables (6 total: 3 specs + 3 status) and
+// newFixture creates unique DynamoDB tables (4 total: 2 specs + 2 status) and
 // registers t.Cleanup to delete them. It also builds the dynamic Kube client.
 func newFixture(t *testing.T, localstackEndpoint, kubeconfigPath string) *fixture {
 	t.Helper()
@@ -102,7 +100,6 @@ func newFixture(t *testing.T, localstackEndpoint, kubeconfigPath string) *fixtur
 	}
 
 	dynDB := dynamodb.NewFromConfig(cfg)
-	streamsDB := dynamodbstreams.NewFromConfig(cfg)
 
 	ts := fmt.Sprintf("%d", time.Now().UnixNano())
 	specsPrefix := "inttest-" + ts + "-specs"
@@ -131,7 +128,6 @@ func newFixture(t *testing.T, localstackEndpoint, kubeconfigPath string) *fixtur
 
 	return &fixture{
 		dynDB:          dynDB,
-		streamsDB:      streamsDB,
 		dbClient:       dbClient,
 		dynKube:        dynKube,
 		kubeconfigPath: kubeconfigPath,
@@ -141,7 +137,7 @@ func newFixture(t *testing.T, localstackEndpoint, kubeconfigPath string) *fixtur
 }
 
 // createTable creates a DynamoDB table with a "documentID" hash key and
-// Streams enabled (NEW_AND_OLD_IMAGES), and registers deletion in t.Cleanup.
+// registers deletion in t.Cleanup.
 func createTable(t *testing.T, dbClient *dynamodb.Client, tableName string) {
 	t.Helper()
 	_, err := dbClient.CreateTable(context.Background(), &dynamodb.CreateTableInput{
@@ -152,10 +148,6 @@ func createTable(t *testing.T, dbClient *dynamodb.Client, tableName string) {
 		},
 		KeySchema: []dbtypes.KeySchemaElement{
 			{AttributeName: aws.String("documentID"), KeyType: dbtypes.KeyTypeHash},
-		},
-		StreamSpecification: &dbtypes.StreamSpecification{
-			StreamEnabled:  aws.Bool(true),
-			StreamViewType: dbtypes.StreamViewTypeNewAndOldImages,
 		},
 	})
 	if err != nil {
@@ -180,9 +172,14 @@ func startApp(t *testing.T, f *fixture) (context.CancelFunc, <-chan error) {
 
 	reg := prometheus.NewRegistry()
 
-	inf := informers.NewKubeApplierInformersWithResyncPeriod(
-		f.dynDB, f.streamsDB, f.specsPrefix,
-		5*time.Second,
+	// Use short poll/watch durations for integration tests so events propagate
+	// quickly without waiting for the default 15s poll interval.
+	inf := informers.NewKubeApplierInformersWithOptions(
+		f.dynDB,
+		f.specsPrefix,
+		5*time.Second,        // resync period
+		500*time.Millisecond, // poll interval — fast for integration tests
+		10*time.Second,       // watch duration — triggers re-list every 10s
 	)
 
 	restCfg, err := clientcmd.BuildConfigFromFlags("", f.kubeconfigPath)
@@ -293,12 +290,11 @@ func createConfigMapDirect(t *testing.T, dynKube dynamic.Interface, namespace, n
 // full access, so we write spec items directly using PutItem.
 // ----------------------------------------------------------------------------
 
-// writeDesireSpec marshals a desire struct into a flat DynamoDB item and
+// writeApplyDesireSpec marshals a desire struct into a flat DynamoDB item and
 // writes it to the given table. It follows the same attribute layout as the
 // production attributevalue.MarshalMap path: top-level struct fields become
 // top-level attributes; documentID is written explicitly as a top-level S
-// attribute; kubeContent is stored as the JSON string in spec_kubeContent /
-// status_kubeContent.
+// attribute; kubeContent is stored as the JSON string in spec_kubeContent.
 func writeApplyDesireSpec(t *testing.T, dbClient *dynamodb.Client, specsPrefix string, d *kubeapplier.ApplyDesire) {
 	t.Helper()
 	tableName := specsPrefix + database.TableSuffixApplyDesires
@@ -337,6 +333,38 @@ func writeApplyDesireSpec(t *testing.T, dbClient *dynamodb.Client, specsPrefix s
 		t.Fatalf("writeApplyDesireSpec PutItem %s/%s: %v", tableName, d.DocumentID, err)
 	}
 }
+
+func writeReadDesireSpec(t *testing.T, dbClient *dynamodb.Client, specsPrefix string, d *kubeapplier.ReadDesire) {
+	t.Helper()
+	tableName := specsPrefix + database.TableSuffixReadDesires
+	item := map[string]dbtypes.AttributeValue{
+		"documentID": &dbtypes.AttributeValueMemberS{Value: d.DocumentID},
+		"version":    &dbtypes.AttributeValueMemberN{Value: "1"},
+		"updateTime": &dbtypes.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339Nano)},
+		"createTime": &dbtypes.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339Nano)},
+		"spec": &dbtypes.AttributeValueMemberM{Value: map[string]dbtypes.AttributeValue{
+			"managementCluster": &dbtypes.AttributeValueMemberS{Value: d.Spec.ManagementCluster},
+			"clusterID":         &dbtypes.AttributeValueMemberS{Value: d.Spec.ClusterID},
+			"targetItem": &dbtypes.AttributeValueMemberM{Value: map[string]dbtypes.AttributeValue{
+				"group":     &dbtypes.AttributeValueMemberS{Value: d.Spec.TargetItem.Group},
+				"version":   &dbtypes.AttributeValueMemberS{Value: d.Spec.TargetItem.Version},
+				"resource":  &dbtypes.AttributeValueMemberS{Value: d.Spec.TargetItem.Resource},
+				"namespace": &dbtypes.AttributeValueMemberS{Value: d.Spec.TargetItem.Namespace},
+				"name":      &dbtypes.AttributeValueMemberS{Value: d.Spec.TargetItem.Name},
+			}},
+		}},
+	}
+	if _, err := dbClient.PutItem(context.Background(), &dynamodb.PutItemInput{
+		TableName: aws.String(tableName),
+		Item:      item,
+	}); err != nil {
+		t.Fatalf("writeReadDesireSpec PutItem %s/%s: %v", tableName, d.DocumentID, err)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Tests
+// ----------------------------------------------------------------------------
 
 // TestIntegration_DeleteDesire pre-creates a ConfigMap on Kind, writes an
 // ApplyDesire (Type=Delete) spec to DynamoDB, starts the app, and asserts:
@@ -398,38 +426,6 @@ func TestIntegration_DeleteDesire(t *testing.T) {
 	})
 	t.Logf("ApplyDesire (Type=Delete) status Successful=True in DynamoDB")
 }
-
-func writeReadDesireSpec(t *testing.T, dbClient *dynamodb.Client, specsPrefix string, d *kubeapplier.ReadDesire) {
-	t.Helper()
-	tableName := specsPrefix + database.TableSuffixReadDesires
-	item := map[string]dbtypes.AttributeValue{
-		"documentID": &dbtypes.AttributeValueMemberS{Value: d.DocumentID},
-		"version":    &dbtypes.AttributeValueMemberN{Value: "1"},
-		"updateTime": &dbtypes.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339Nano)},
-		"createTime": &dbtypes.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339Nano)},
-		"spec": &dbtypes.AttributeValueMemberM{Value: map[string]dbtypes.AttributeValue{
-			"managementCluster": &dbtypes.AttributeValueMemberS{Value: d.Spec.ManagementCluster},
-			"clusterID":         &dbtypes.AttributeValueMemberS{Value: d.Spec.ClusterID},
-			"targetItem": &dbtypes.AttributeValueMemberM{Value: map[string]dbtypes.AttributeValue{
-				"group":     &dbtypes.AttributeValueMemberS{Value: d.Spec.TargetItem.Group},
-				"version":   &dbtypes.AttributeValueMemberS{Value: d.Spec.TargetItem.Version},
-				"resource":  &dbtypes.AttributeValueMemberS{Value: d.Spec.TargetItem.Resource},
-				"namespace": &dbtypes.AttributeValueMemberS{Value: d.Spec.TargetItem.Namespace},
-				"name":      &dbtypes.AttributeValueMemberS{Value: d.Spec.TargetItem.Name},
-			}},
-		}},
-	}
-	if _, err := dbClient.PutItem(context.Background(), &dynamodb.PutItemInput{
-		TableName: aws.String(tableName),
-		Item:      item,
-	}); err != nil {
-		t.Fatalf("writeReadDesireSpec PutItem %s/%s: %v", tableName, d.DocumentID, err)
-	}
-}
-
-// ----------------------------------------------------------------------------
-// Tests
-// ----------------------------------------------------------------------------
 
 // TestIntegration_ApplyDesire writes an ApplyDesire spec to the DynamoDB specs
 // table, starts the full app stack (informers + controllers + leader election),

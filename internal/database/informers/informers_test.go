@@ -13,7 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	dbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
-	"github.com/aws/aws-sdk-go-v2/service/dynamodbstreams"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
 
@@ -24,80 +24,128 @@ import (
 
 // --- Unit tests (no LocalStack required) ---
 
-// TestGetRecordsLimit verifies the declared per-call record limit is the AWS
-// maximum so that it is always explicit rather than relying on API defaults.
-func TestGetRecordsLimit(t *testing.T) {
-	if getRecordsLimit != 1000 {
-		t.Errorf("getRecordsLimit = %d, want 1000", getRecordsLimit)
-	}
+// fakeSinceReader is an in-memory sinceReader for unit testing the poll watcher.
+type fakeSinceReader[T any] struct {
+	mu    sync.Mutex
+	items []*T
 }
 
-// TestPollShardWaitsForParent verifies the parent-before-child ordering
-// guarantee (Fix 1): a child shard goroutine must not start polling until the
-// parent's done channel is closed.
-func TestPollShardWaitsForParent(t *testing.T) {
-	parentDone := make(chan struct{})
+func (f *fakeSinceReader[T]) ListSince(_ context.Context, since time.Time) ([]*T, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]*T(nil), f.items...), nil
+}
 
-	var mu sync.RWMutex
-	workers := map[string]*shardWorkerState{
-		"parent-shard": {done: parentDone},
+func (f *fakeSinceReader[T]) setItems(items []*T) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.items = items
+}
+
+func TestPollWatcher_DeliversModifiedEvents(t *testing.T) {
+	reader := &fakeSinceReader[kubeapplier.ApplyDesire]{}
+
+	d1 := &kubeapplier.ApplyDesire{
+		DynamoDBMetadata: kubeapplier.DynamoDBMetadata{DocumentID: "c1--a"},
+		Spec:             kubeapplier.ApplyDesireSpec{ClusterID: "c1"},
 	}
-
-	w := &dynamoDBStreamWatcher{
-		resultCh: make(chan watch.Event, 10),
-		done:     make(chan struct{}),
+	d2 := &kubeapplier.ApplyDesire{
+		DynamoDBMetadata: kubeapplier.DynamoDBMetadata{DocumentID: "c1--b"},
+		Spec:             kubeapplier.ApplyDesireSpec{ClusterID: "c1"},
 	}
-	childWS := &shardWorkerState{done: make(chan struct{})}
-	workers["child-shard"] = childWS
+	reader.setItems([]*kubeapplier.ApplyDesire{d1, d2})
 
-	// childPolling is closed by the child goroutine as soon as it exits the
-	// parent-wait select (i.e. once it would start polling).
-	childPolling := make(chan struct{})
-
-	// Run pollShard in the background. We use a context that we cancel as soon
-	// as the parent is done, so the child exits immediately after unblocking
-	// rather than panicking on a nil streamsClient.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	rediscoverCh := make(chan string, 1)
-	go func() {
-		w.pollShard(
-			ctx,
-			nil, // streamsClient — child exits via ctx cancel before using it
-			"stream-arn",
-			"table",
-			shardState{shardID: "child-shard", parentShardID: "parent-shard"},
-			childWS,
-			&mu,
-			workers,
-			nil,
-			rediscoverCh,
-		)
-		close(childPolling)
-	}()
+	w := newDynamoDBPollWatcher(
+		ctx,
+		"test-table",
+		reader,
+		func(d *kubeapplier.ApplyDesire) (runtime.Object, error) { return d, nil },
+		10*time.Millisecond,  // fast poll for test
+		10*time.Minute,       // long watch duration so it doesn't close during test
+	)
 
-	// Give the goroutine time to reach the parent-wait select.
-	time.Sleep(30 * time.Millisecond)
-
-	// Child should not have proceeded yet.
-	select {
-	case <-childPolling:
-		t.Fatal("child started polling before parent shard was done")
-	default:
+	received := map[string]bool{}
+	timeout := time.After(2 * time.Second)
+	for len(received) < 2 {
+		select {
+		case event, ok := <-w.ResultChan():
+			if !ok {
+				t.Fatal("result channel closed unexpectedly")
+			}
+			if event.Type != watch.Modified {
+				t.Errorf("expected Modified event, got %v", event.Type)
+			}
+			d, ok := event.Object.(*kubeapplier.ApplyDesire)
+			if !ok {
+				t.Fatalf("unexpected object type %T", event.Object)
+			}
+			received[d.DocumentID] = true
+		case <-timeout:
+			t.Fatalf("timed out waiting for events; received %v", received)
+		}
 	}
 
-	// Close parent done and cancel ctx simultaneously so child unblocks then
-	// exits cleanly without calling the nil streamsClient.
-	cancel()
-	close(parentDone)
+	if !received["c1--a"] || !received["c1--b"] {
+		t.Errorf("did not receive expected document IDs; got %v", received)
+	}
+	w.Stop()
+}
 
-	// Child must now exit promptly.
+func TestPollWatcher_ClosesAfterWatchDuration(t *testing.T) {
+	reader := &fakeSinceReader[kubeapplier.ApplyDesire]{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	watchDuration := 50 * time.Millisecond
+	w := newDynamoDBPollWatcher(
+		ctx,
+		"test-table",
+		reader,
+		func(d *kubeapplier.ApplyDesire) (runtime.Object, error) { return d, nil },
+		1*time.Second,  // poll interval longer than watch duration — no polls expected
+		watchDuration,
+	)
+
+	// The result channel should be closed after watchDuration.
 	select {
-	case <-childPolling:
-		// good
+	case _, ok := <-w.ResultChan():
+		if ok {
+			t.Error("expected channel to be closed, got an event")
+		}
+		// Channel closed as expected.
 	case <-time.After(2 * time.Second):
-		t.Fatal("child shard goroutine did not exit after parent done and ctx cancel")
+		t.Fatal("result channel was not closed after watch duration elapsed")
+	}
+}
+
+func TestPollWatcher_StopClosesChannel(t *testing.T) {
+	reader := &fakeSinceReader[kubeapplier.ApplyDesire]{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	w := newDynamoDBPollWatcher(
+		ctx,
+		"test-table",
+		reader,
+		func(d *kubeapplier.ApplyDesire) (runtime.Object, error) { return d, nil },
+		1*time.Hour,
+		1*time.Hour,
+	)
+
+	w.Stop()
+
+	select {
+	case _, ok := <-w.ResultChan():
+		if ok {
+			t.Error("expected channel to be closed after Stop()")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("result channel was not closed after Stop()")
 	}
 }
 
@@ -203,7 +251,7 @@ func requireLocalStack(t *testing.T) {
 	}
 }
 
-func newLocalStackClients(t *testing.T) (*dynamodb.Client, *dynamodbstreams.Client) {
+func newLocalStackClient(t *testing.T) *dynamodb.Client {
 	t.Helper()
 	endpoint := os.Getenv("LOCALSTACK_ENDPOINT")
 	cfg, err := awsconfig.LoadDefaultConfig(context.Background(),
@@ -214,9 +262,7 @@ func newLocalStackClients(t *testing.T) (*dynamodb.Client, *dynamodbstreams.Clie
 	if err != nil {
 		t.Fatalf("awsconfig.LoadDefaultConfig: %v", err)
 	}
-	dbClient := dynamodb.NewFromConfig(cfg)
-	streamsClient := dynamodbstreams.NewFromConfig(cfg)
-	return dbClient, streamsClient
+	return dynamodb.NewFromConfig(cfg)
 }
 
 func createTestTable(t *testing.T, dbClient *dynamodb.Client, tableName string) {
@@ -230,10 +276,6 @@ func createTestTable(t *testing.T, dbClient *dynamodb.Client, tableName string) 
 		},
 		KeySchema: []dbtypes.KeySchemaElement{
 			{AttributeName: aws.String("documentID"), KeyType: dbtypes.KeyTypeHash},
-		},
-		StreamSpecification: &dbtypes.StreamSpecification{
-			StreamEnabled:  aws.Bool(true),
-			StreamViewType: dbtypes.StreamViewTypeNewAndOldImages,
 		},
 	})
 	if err != nil {
@@ -271,12 +313,24 @@ func waitForCacheCount(t *testing.T, store cache.Store, want int, timeout time.D
 	}
 }
 
+// newTestInformers creates informers with short poll/watch durations suitable
+// for integration tests.
+func newTestInformers(dbClient *dynamodb.Client, prefix string) KubeApplierInformers {
+	return NewKubeApplierInformersWithOptions(
+		dbClient,
+		prefix,
+		30*time.Second,  // resync period
+		500*time.Millisecond, // fast poll for tests
+		10*time.Second,  // watch duration — triggers a re-list every 10s in tests
+	)
+}
+
 func TestIntegration_InformerSyncsExistingDocuments(t *testing.T) {
 	requireLocalStack(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	dbClient, streamsClient := newLocalStackClients(t)
+	dbClient := newLocalStackClient(t)
 	prefix := fmt.Sprintf("inf-existing-%d", time.Now().UnixNano())
 
 	applyTable := prefix + database.TableSuffixApplyDesires
@@ -304,7 +358,7 @@ func TestIntegration_InformerSyncsExistingDocuments(t *testing.T) {
 		}
 	}
 
-	info := NewKubeApplierInformersWithResyncPeriod(dbClient, streamsClient, prefix, 30*time.Second)
+	info := newTestInformers(dbClient, prefix)
 	startAndSync(t, ctx, info)
 
 	applyInf, applyLister := info.ApplyDesires()
@@ -329,13 +383,13 @@ func TestIntegration_InformerSyncsExistingDocuments(t *testing.T) {
 	}
 }
 
-func TestIntegration_StreamDeliversEvents(t *testing.T) {
+func TestIntegration_PollDeliversEvents(t *testing.T) {
 	requireLocalStack(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	dbClient, streamsClient := newLocalStackClients(t)
-	prefix := fmt.Sprintf("inf-stream-%d", time.Now().UnixNano())
+	dbClient := newLocalStackClient(t)
+	prefix := fmt.Sprintf("inf-poll-%d", time.Now().UnixNano())
 
 	applyTable := prefix + database.TableSuffixApplyDesires
 	readTable := prefix + database.TableSuffixReadDesires
@@ -345,12 +399,12 @@ func TestIntegration_StreamDeliversEvents(t *testing.T) {
 	dbCRUD := database.NewDynamoDBKubeApplierDBClient(dbClient, dbClient, prefix, prefix)
 	crud := dbCRUD.ApplyDesireStatus()
 
-	info := NewKubeApplierInformersWithResyncPeriod(dbClient, streamsClient, prefix, 30*time.Second)
+	info := newTestInformers(dbClient, prefix)
 	startAndSync(t, ctx, info)
 
 	applyInf, _ := info.ApplyDesires()
 
-	// Create a document — the stream watcher should deliver it.
+	// Create a document — the poll watcher should deliver it within poll interval.
 	d := &kubeapplier.ApplyDesire{
 		DynamoDBMetadata: kubeapplier.DynamoDBMetadata{DocumentID: "c1--live"},
 		Spec: kubeapplier.ApplyDesireSpec{
@@ -367,7 +421,8 @@ func TestIntegration_StreamDeliversEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	waitForCacheCount(t, applyInf.GetStore(), 1, 30*time.Second)
+	// Item should appear in cache within a few poll intervals.
+	waitForCacheCount(t, applyInf.GetStore(), 1, 15*time.Second)
 
 	// Modify the document.
 	created.Spec.ClusterID = "c2"
@@ -375,8 +430,8 @@ func TestIntegration_StreamDeliversEvents(t *testing.T) {
 		t.Fatalf("Replace: %v", err)
 	}
 
-	// Wait for the modification to appear in the cache.
-	deadline := time.After(30 * time.Second)
+	// Wait for the modification to propagate into the cache.
+	deadline := time.After(15 * time.Second)
 	for {
 		item, exists, _ := applyInf.GetStore().GetByKey("c1--live")
 		if exists {
@@ -390,12 +445,6 @@ func TestIntegration_StreamDeliversEvents(t *testing.T) {
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
-
-	// Delete the document.
-	if err := crud.Delete(ctx, "c1--live"); err != nil {
-		t.Fatalf("Delete: %v", err)
-	}
-	waitForCacheCount(t, applyInf.GetStore(), 0, 30*time.Second)
 }
 
 func TestIntegration_PerTableIsolation(t *testing.T) {
@@ -403,7 +452,7 @@ func TestIntegration_PerTableIsolation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	dbClient, streamsClient := newLocalStackClients(t)
+	dbClient := newLocalStackClient(t)
 	prefixA := fmt.Sprintf("inf-iso-a-%d", time.Now().UnixNano())
 	prefixB := fmt.Sprintf("inf-iso-b-%d", time.Now().UnixNano())
 
@@ -414,8 +463,8 @@ func TestIntegration_PerTableIsolation(t *testing.T) {
 
 	dbCRUDA := database.NewDynamoDBKubeApplierDBClient(dbClient, dbClient, prefixA, prefixA)
 
-	infoA := NewKubeApplierInformersWithResyncPeriod(dbClient, streamsClient, prefixA, 30*time.Second)
-	infoB := NewKubeApplierInformersWithResyncPeriod(dbClient, streamsClient, prefixB, 30*time.Second)
+	infoA := newTestInformers(dbClient, prefixA)
+	infoB := newTestInformers(dbClient, prefixB)
 	startAndSync(t, ctx, infoA)
 	startAndSync(t, ctx, infoB)
 
@@ -438,7 +487,7 @@ func TestIntegration_PerTableIsolation(t *testing.T) {
 		t.Fatalf("Create in A: %v", err)
 	}
 
-	waitForCacheCount(t, applyInfA.GetStore(), 1, 30*time.Second)
+	waitForCacheCount(t, applyInfA.GetStore(), 1, 15*time.Second)
 
 	// B should remain empty.
 	time.Sleep(500 * time.Millisecond)

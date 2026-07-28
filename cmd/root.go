@@ -127,10 +127,9 @@ func (f *KubeApplierRootCmdFlags) ToKubeApplierOptions(ctx context.Context) (*ap
 
 	specsClient := app.NewDynamoDBClient(awsCfg)
 	statusClient := app.NewDynamoDBClient(awsCfg)
-	streamsClient := app.NewDynamoDBStreamsClient(awsCfg)
 
 	dbClient := database.NewDynamoDBKubeApplierDBClient(specsClient, statusClient, specsPrefix, statusPrefix)
-	dynamoDBInformers := informers.NewKubeApplierInformers(specsClient, streamsClient, specsPrefix)
+	dynamoDBInformers := informers.NewKubeApplierInformers(specsClient, specsPrefix)
 
 	dyn, err := app.NewDynamicClient(kubeconfig, f.KubeQPS, f.KubeBurst)
 	if err != nil {

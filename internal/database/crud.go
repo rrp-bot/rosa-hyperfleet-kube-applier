@@ -11,8 +11,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
-
-	kubeapplier "github.com/rrp-bot/rosa-hyperfleet-kube-applier/api/kubeapplier"
 )
 
 // desire is the type constraint for the generic CRUD implementations. It
@@ -123,6 +121,36 @@ func (r *dynamoDBSpecReader[T, PT]) List(ctx context.Context) ([]*T, error) {
 			obj, err := itemToDesire[T, PT](item)
 			if err != nil {
 				return nil, fmt.Errorf("dynamodb Scan %s convert: %w", r.table, err)
+			}
+			result = append(result, obj)
+		}
+	}
+	return result, nil
+}
+
+// ListSince returns all items whose updateTime attribute is strictly after
+// since. It uses an eventually consistent Scan with a FilterExpression — the
+// caller is responsible for fetching authoritative data via a consistent
+// GetItem before acting on any returned document ID.
+func (r *dynamoDBSpecReader[T, PT]) ListSince(ctx context.Context, since time.Time) ([]*T, error) {
+	var result []*T
+	paginator := dynamodb.NewScanPaginator(r.client, &dynamodb.ScanInput{
+		TableName:                 aws.String(r.table),
+		ConsistentRead:            aws.Bool(false),
+		FilterExpression:          aws.String("updateTime > :since"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":since": &types.AttributeValueMemberS{Value: since.UTC().Format(time.RFC3339Nano)},
+		},
+	})
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("dynamodb Scan (since) %s: %w", r.table, err)
+		}
+		for _, item := range page.Items {
+			obj, err := itemToDesire[T, PT](item)
+			if err != nil {
+				return nil, fmt.Errorf("dynamodb Scan (since) %s convert: %w", r.table, err)
 			}
 			result = append(result, obj)
 		}
@@ -262,15 +290,4 @@ func (c *dynamoDBDesireCRUD[T, PT]) Delete(ctx context.Context, documentID strin
 	return nil
 }
 
-// --- Exported conversion helpers used by the informers package ---
 
-// ItemToApplyDesire converts a raw DynamoDB attribute map (from a table item or
-// stream image) to an *ApplyDesire.
-func ItemToApplyDesire(item map[string]types.AttributeValue) (*kubeapplier.ApplyDesire, error) {
-	return itemToDesire[kubeapplier.ApplyDesire, *kubeapplier.ApplyDesire](item)
-}
-
-// ItemToReadDesire converts a raw DynamoDB attribute map to a *ReadDesire.
-func ItemToReadDesire(item map[string]types.AttributeValue) (*kubeapplier.ReadDesire, error) {
-	return itemToDesire[kubeapplier.ReadDesire, *kubeapplier.ReadDesire](item)
-}
