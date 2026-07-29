@@ -79,4 +79,4 @@ require (
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.2 // indirect
 )
 
-replace github.com/openshift-online/rosa-hyperfleet-api/hyperfleet-db => github.com/rrp-bot/rosa-hyperfleet-api/hyperfleet-db v0.0.0-20260728202247-7110c5c8c77e
+replace github.com/openshift-online/rosa-hyperfleet-api/hyperfleet-db => github.com/rrp-bot/rosa-hyperfleet-api/hyperfleet-db v0.0.0-20260729053446-5946ac65755a
